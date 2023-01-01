@@ -716,13 +716,13 @@ abstract class Achievement {
 	public void update() {
 		calcCurrentValue();
 		int max = threasholds[threasholds.length - 1];
-		if (currentValue > max)
-			currentValue = max;
-		progressGraph.currentValue = currentValue;
+		//if (currentValue > max) currentValue = max;
+		progressGraph.currentValue = currentValue < max ? currentValue : max;
 		progressGraph.threasholds = threasholds;
 		progressGraph.invalidate();
 		label.setText(toString());
-		progressLabel.setText(currentValue + "/" + max + " (" + Core.calRate(currentValue, max) + "%)");
+		progressLabel.setText(
+				currentValue + "/" + max + " (" + Core.calRate(currentValue < max ? currentValue : max, max) + "%)");
 	}
 
 	public abstract void calcCurrentValue();
@@ -829,8 +829,6 @@ class RateAchievement extends Achievement {
 			if (targetRounds.size() >= limit && rate >= targetRate)
 				currentValue += 1;
 		}
-		double rate = Core.calRate(winCount, targetRounds.size());
-		currentValue = rate >= targetRate ? 1 : 0;
 	}
 
 	@Override
