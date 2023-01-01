@@ -1,6 +1,9 @@
+import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.Graphics;
 import java.awt.Insets;
 import java.awt.Rectangle;
 import java.awt.event.WindowAdapter;
@@ -12,6 +15,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -22,7 +26,11 @@ import java.math.RoundingMode;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -39,19 +47,25 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.MissingResourceException;
 import java.util.Properties;
+import java.util.PropertyResourceBundle;
+import java.util.Random;
 import java.util.ResourceBundle;
+import java.util.ResourceBundle.Control;
 import java.util.TimeZone;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.swing.Box;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextPane;
 import javax.swing.SpringLayout;
@@ -84,7 +98,7 @@ class PlayerStat {
 
 	public boolean setWin(Round r, boolean win, int score) {
 		if (win) {
-			if (!r.history)
+			if (r.match.session == Core.currentSession)
 				winCount += 1;
 			totalWinCount += 1;
 			winStreak += 1;
@@ -110,6 +124,7 @@ class Player {
 	int partyId;
 	int teamId;
 	int ranking; // rank of current round
+	boolean disabled;
 
 	Boolean qualified;
 	int score; // ラウンド中のスコアあるいは順位スコア
@@ -143,9 +158,10 @@ class Round {
 	int myPlayerId;
 	int[] teamScore;
 	int playerCount;
+	int playerCountAdd;
+	int qualifiedCount;
 	Map<String, Player> byName = new HashMap<String, Player>();
 	Map<Integer, Player> byId = new HashMap<Integer, Player>();
-	boolean history;
 
 	public Round(String name, Date id, boolean isFinal, Match match) {
 		this.name = name;
@@ -197,16 +213,29 @@ class Round {
 		return teamScore[teamId];
 	}
 
+	public boolean isEnabled() {
+		Player p = getMe();
+		return p != null && !p.disabled;
+	}
+
+	public boolean isDate(int dayKey) {
+		return dayKey == Core.toDateKey(id);
+	}
+
 	public boolean isFallBall() {
-		return "FallGuy_FallBall_5".equals(name);
+		return fixed && "FallGuy_FallBall_5".equals(name);
 	}
 
 	public boolean isCustomFallBall() {
-		return "event_only_fall_ball_template".equals(match.name);
+		return isFallBall() && "event_only_fall_ball_template".equals(match.name);
 	}
 
 	public int getSubstancePlayerCount() {
-		return playerCount / 2 * 2;
+		return playerCount + playerCountAdd;
+	}
+
+	public int getSubstanceQualifiedCount() {
+		return qualifiedCount * 2 > playerCount ? qualifiedCount + playerCountAdd : qualifiedCount;
 	}
 
 	// 自分がクリアしたかどうか
@@ -303,12 +332,37 @@ class Round {
 
 	@Override
 	public String toString() {
-		return getDef().getName();
+		Player p = getMe();
+		StringBuilder buf = new StringBuilder();
+		if (start == null)
+			return getDef().getName();
+		buf.append(Core.datef.format(start));
+		if (p != null) {
+			buf.append(" ").append(p.isQualified() ? "○" : "☓");
+			if (p.isQualified())
+				buf.append(Core.pad(getSubstanceQualifiedCount())).append("vs")
+						.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount()));
+			else
+				buf.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount())).append("vs")
+						.append(Core.pad(getSubstanceQualifiedCount()));
+		}
+		buf.append("(").append(Core.pad(playerCountAdd)).append(")");
+		if (p != null)
+			buf.append(" ").append(getTeamScore(p.teamId)).append(":")
+					.append(getTeamScore(1 - p.teamId));
+		if (myFinish != null)
+			buf.append(" ").append((double) getTime(myFinish) / 1000).append("s");
+		buf.append(" ").append(match.pingMS).append("ms");
+		if (p.disabled)
+			buf.append(" ☓");
+		return new String(buf);
+		//		return getDef().getName();
 	}
 }
 
 // 一つのショー
 class Match {
+	long session; // Player.log の createdTime
 	boolean fixed; // 完了まで読み込み済み
 	String name;
 	String ip;
@@ -500,118 +554,288 @@ class RoundDef {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
-// Core.rounds もとに実績達成判定
+// Core.rounds をもとに日毎のチャレンジ達成判定
+abstract class Challenge {
+	// yyyyMMdd の８桁数値
+	public abstract boolean isComplete(int dayKey);
+
+	public int point() {
+		return 1;
+	}
+
+	public abstract String getName();
+
+	@Override
+	public String toString() {
+		return getName() + "(" + point() + ")";
+	}
+}
+
+class RoundCountChallenge extends Challenge {
+	int count;
+
+	public RoundCountChallenge(int count) {
+		this.count = count;
+	}
+
+	@Override
+	public boolean isComplete(int dayKey) {
+		return Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isDate(dayKey)).size() >= count;
+	}
+
+	public int point() {
+		return count > 10 ? 2 : 1;
+	}
+
+	@Override
+	public String getName() {
+		return count + " round played";
+	}
+}
+
+class WinCountChallenge extends Challenge {
+	int count;
+	boolean overtimeOnly;
+	int playerCount;
+	int thresholdScoreDiff;
+
+	public WinCountChallenge(int count, boolean overtimeOnly, int playerCount, int scoreDiff) {
+		this.count = count;
+		this.overtimeOnly = overtimeOnly;
+		this.playerCount = playerCount;
+		this.thresholdScoreDiff = scoreDiff;
+	}
+
+	@Override
+	public boolean isComplete(int dayKey) {
+		return Core.filter(r -> {
+			if (playerCount > 0 && r.getSubstanceQualifiedCount() != playerCount)
+				return false;
+			if (r.teamScore != null) {
+				int scoreDiff = Math.abs(r.teamScore[0] - r.teamScore[1]);
+				if (thresholdScoreDiff == 1 && scoreDiff != 1)
+					return false;
+				if (thresholdScoreDiff > 1 && scoreDiff < thresholdScoreDiff)
+					return false;
+			}
+			return r.isFallBall() && r.isCustomFallBall() && r.isQualified()
+					&& (!overtimeOnly || r.getTime(r.myFinish) > 121000) && r.isDate(dayKey);
+		}).size() > count;
+	}
+
+	public int point() {
+		return count >= 10 ? 2 : thresholdScoreDiff > 2 ? 2 : 1;
+	}
+
+	@Override
+	public String getName() {
+		return count + " wins" + (overtimeOnly ? " at overtime round" : "")
+				+ (playerCount > 0 ? " on " + playerCount + "vs" + playerCount : "")
+				+ (thresholdScoreDiff > 0 ? " over " + thresholdScoreDiff + " scores" : "");
+	}
+}
+
+class StreakChallenge extends Challenge {
+	int targetStreak;
+
+	public StreakChallenge(int streak) {
+		this.targetStreak = streak;
+	}
+
+	@Override
+	public boolean isComplete(int dayKey) {
+		int streak = 0;
+		for (Round r : Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isDate(dayKey))) {
+			if (r.isQualified()) {
+				streak += 1;
+				if (targetStreak == streak)
+					return true;
+			} else
+				streak = 0;
+		}
+		return false;
+	}
+
+	public int point() {
+		return targetStreak >= 3 ? 2 : 1;
+	}
+
+	@Override
+	public String getName() {
+		return targetStreak + " wins streak";
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// Core.rounds をもとに実績達成判定
+// 一つの実績に複数の達成地と付与ポイントを保持可能とする。
+class GraphPanel extends JPanel {
+	int currentValue;
+	int[] threasholds;
+
+	@Override
+	public Dimension getPreferredSize() {
+		return new Dimension(200, 20);
+	}
+
+	@Override
+	public void paint(Graphics g) {
+		if (threasholds == null)
+			return;
+		int w = getWidth(), h = getHeight();
+		int max = threasholds[threasholds.length - 1];
+		g.setColor(Color.RED);
+		g.fillRect(1, 1, (w - 2) * currentValue / max, h - 2);
+		g.setColor(Color.GREEN);
+		for (int x : threasholds) {
+			if (x == max)
+				break;
+			int xx = (w - 2) * x / max + 1;
+			g.drawLine(xx, 1, xx, h - 2);
+		}
+		g.setColor(Color.BLACK);
+		g.drawRect(0, 0, w - 1, h - 1);
+	}
+}
+
 abstract class Achievement {
-	public abstract boolean isCompleted();
+	int currentValue;
+	int[] threasholds;
+	int[] points;
+	JPanel panel = new JPanel(new BorderLayout());
+	JLabel label = new JLabel();
+	GraphPanel progressGraph = new GraphPanel();
+	JLabel progressLabel = new JLabel();
+
+	{
+		panel.add(label, BorderLayout.NORTH);
+		panel.add(progressGraph, BorderLayout.CENTER);
+		panel.add(progressLabel, BorderLayout.EAST);
+	}
+
+	public void update() {
+		calcCurrentValue();
+		int max = threasholds[threasholds.length - 1];
+		if (currentValue > max)
+			currentValue = max;
+		progressGraph.currentValue = currentValue;
+		progressGraph.threasholds = threasholds;
+		progressGraph.invalidate();
+		label.setText(toString());
+		progressLabel.setText(currentValue + "/" + max + " (" + Core.calRate(currentValue, max) + "%)");
+	}
+
+	public abstract void calcCurrentValue();
 
 	public abstract String toString();
 }
 
 class RoundCountAchievement extends Achievement {
-	int count;
-
-	public RoundCountAchievement(int count) {
-		this.count = count;
+	public RoundCountAchievement(int[] threasholds, int[] points) {
+		this.threasholds = threasholds;
+		this.points = points;
 	}
 
 	@Override
-	public boolean isCompleted() {
-		return Core.filtered(r -> r.isFallBall() && r.isCustomFallBall() && r.getMe() != null).size() >= count;
+	public void calcCurrentValue() {
+		currentValue = Core.filter(r -> r.isFallBall() && r.isCustomFallBall()).size();
 	}
 
 	@Override
 	public String toString() {
-		return count + " rounds played";
+		return "Custom Rounds played";
 	}
 }
 
 class WinCountAchievement extends Achievement {
-	int count;
 	boolean overtimeOnly;
 
-	public WinCountAchievement(int count) {
-		this.count = count;
-	}
-
-	public WinCountAchievement(int count, boolean overtimeOnly) {
-		this.count = count;
+	public WinCountAchievement(int[] threasholds, int[] points, boolean overtimeOnly) {
+		this.threasholds = threasholds;
+		this.points = points;
 		this.overtimeOnly = overtimeOnly;
 	}
 
 	@Override
-	public boolean isCompleted() {
-		return Core
-				.filtered(r -> r.isFallBall() && r.isCustomFallBall() && r.isQualified()
+	public void calcCurrentValue() {
+		currentValue = Core
+				.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isQualified()
 						&& (!overtimeOnly || r.getTime(r.myFinish) > 121000))
-				.size() >= count;
+				.size();
 	}
 
 	@Override
 	public String toString() {
-		return count + " wins" + (overtimeOnly ? " at overtime round" : "");
+		return "Wins" + (overtimeOnly ? " at overtime round" : "");
 	}
 }
 
 class StreakAchievement extends Achievement {
-	int count;
+	int targetStreak;
 
-	public StreakAchievement(int count) {
-		this.count = count;
+	public StreakAchievement(int[] threasholds, int[] points, int streak) {
+		this.threasholds = threasholds;
+		this.points = points;
+		this.targetStreak = streak;
 	}
 
 	@Override
-	public boolean isCompleted() {
-		int maxStreak = 0;
+	public void calcCurrentValue() {
+		currentValue = 0;
 		int streak = 0;
-		for (Round r : Core.filtered(r -> r.isFallBall() && r.isCustomFallBall() && r.getMe() != null)) {
+		for (Round r : Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled())) {
 			if (r.isQualified()) {
 				streak += 1;
-				if (maxStreak < streak)
-					maxStreak = streak;
+				if (targetStreak == streak)
+					currentValue += 1;
 			} else
 				streak = 0;
 		}
-		return maxStreak >= count;
 	}
 
 	@Override
 	public String toString() {
-		return count + " wins streak";
+		return targetStreak + " wins streak";
 	}
 }
 
 class RateAchievement extends Achievement {
-	double rate;
+	double targetRate;
 	int limit;
 
-	public RateAchievement(double rate, int limit) {
-		this.rate = rate;
+	public RateAchievement(int[] threasholds, int[] points, double rate, int limit) {
+		this.threasholds = threasholds;
+		this.points = points;
+		this.targetRate = rate;
 		this.limit = limit;
 	}
 
 	@Override
-	public boolean isCompleted() {
+	public void calcCurrentValue() {
+		currentValue = 0;
 		int winCount = 0;
+		List<Round> filtered = Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled());
+		if (filtered.size() < limit)
+			return;
 		List<Round> targetRounds = new ArrayList<>();
-		;
-		for (Round r : Core.filtered(r -> r.isFallBall() && r.isCustomFallBall() && r.getMe() != null)) {
+		for (Round r : filtered) {
 			targetRounds.add(r);
 			winCount += r.isQualified() ? 1 : 0;
-			if (limit > 0 && targetRounds.size() > limit) {
+			if (targetRounds.size() > limit) {
 				Round o = targetRounds.remove(0);
 				winCount -= o.isQualified() ? 1 : 0;
 			}
-			if (limit > 0 && targetRounds.size() >= limit && Core.calRate(winCount, targetRounds.size()) * 100 >= rate)
-				return true;
+			double rate = Core.calRate(winCount, targetRounds.size());
+			if (targetRounds.size() >= limit && rate >= targetRate)
+				currentValue += 1;
 		}
-		if (limit > 0)
-			return false;
-		return Core.calRate(winCount, targetRounds.size()) * 100 >= rate;
+		double rate = Core.calRate(winCount, targetRounds.size());
+		currentValue = rate >= targetRate ? 1 : 0;
 	}
 
 	@Override
 	public String toString() {
-		return rate + "% wins in " + limit + " rounds";
+		return targetRate + "% wins in " + limit + " rounds";
 	}
 }
 
@@ -623,7 +847,7 @@ interface RoundFilter {
 class AllRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return true;
+		return r.isFallBall() && r.getMe() != null;
 	}
 
 	@Override
@@ -635,7 +859,7 @@ class AllRoundFilter implements RoundFilter {
 class CustomRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isCustomFallBall();
+		return r.isFallBall() && r.getMe() != null && r.isCustomFallBall();
 	}
 
 	@Override
@@ -647,12 +871,46 @@ class CustomRoundFilter implements RoundFilter {
 class NotCustomRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return !r.isCustomFallBall();
+		return r.isFallBall() && r.getMe() != null && !r.isCustomFallBall();
 	}
 
 	@Override
 	public String toString() {
-		return "NotCustomOnly";
+		return "Not CustomOnly";
+	}
+}
+
+class FewAllyCustomRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		if (!r.isCustomFallBall())
+			return false;
+		if (r.isQualified())
+			return r.getSubstanceQualifiedCount() * 2 < r.getSubstancePlayerCount();
+		else
+			return r.getSubstanceQualifiedCount() * 2 > r.getSubstancePlayerCount();
+	}
+
+	@Override
+	public String toString() {
+		return "Few ally(Custom)";
+	}
+}
+
+class ManyAllyCustomRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		if (!r.isCustomFallBall())
+			return false;
+		if (r.isQualified())
+			return r.getSubstanceQualifiedCount() * 2 > r.getSubstancePlayerCount();
+		else
+			return r.getSubstanceQualifiedCount() * 2 < r.getSubstancePlayerCount();
+	}
+
+	@Override
+	public String toString() {
+		return "Many ally(Custom)";
 	}
 }
 
@@ -692,6 +950,12 @@ class Core {
 		return result;
 	}
 
+	public static int toDateKey(Date date) {
+		Calendar c = Calendar.getInstance();
+		c.setTime(date);
+		return c.get(Calendar.YEAR) * 10000 + c.get(Calendar.MONTH) * 100 + c.get(Calendar.DAY_OF_MONTH);
+	}
+
 	/*
 	static String dump(byte[] bytes) {
 		StringBuilder b = new StringBuilder();
@@ -703,53 +967,64 @@ class Core {
 	*/
 
 	//////////////////////////////////////////////////////////////
-	public static String currentServerIp;
-	public static RoundFilter filter = null;
+	public static RoundFilter filter = new AllRoundFilter();
 	public static int limit = 0;
+	public static long currentSession;
+	public static String currentServerIp;
 	public static final List<Match> matches = new ArrayList<>();
 	public static final List<Round> rounds = new ArrayList<>();
+	public static List<Round> filtered;
 	public static Map<String, Map<String, String>> servers = new HashMap<>();
-	public static PlayerStat stat = new PlayerStat();
-	public static List<Achievement> achievements = new ArrayList<>();
+	public static final PlayerStat stat = new PlayerStat();
+	public static final List<Achievement> achievements = new ArrayList<>();
+	public static final List<Challenge> dailyChallenges = new ArrayList<>();
 
-	static DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
+	static final SimpleDateFormat datef = new SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.JAPAN);
+	static final DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
 	static {
 		f.setTimeZone(TimeZone.getTimeZone("UTC"));
-		achievements.add(new RateAchievement(60, 10));
-		achievements.add(new RateAchievement(65, 10));
-		achievements.add(new RateAchievement(50, 30));
-		achievements.add(new RateAchievement(55, 30));
-		achievements.add(new RateAchievement(60, 30));
-		achievements.add(new RateAchievement(65, 30));
-		achievements.add(new RateAchievement(70, 30));
-		achievements.add(new RateAchievement(75, 30));
-		achievements.add(new RateAchievement(60, 50));
-		achievements.add(new RateAchievement(65, 50));
-		achievements.add(new RateAchievement(70, 50));
-		achievements.add(new RateAchievement(75, 50));
-		achievements.add(new RoundCountAchievement(10));
-		achievements.add(new RoundCountAchievement(20));
-		achievements.add(new RoundCountAchievement(100));
-		achievements.add(new RoundCountAchievement(500));
-		achievements.add(new RoundCountAchievement(1000));
-		achievements.add(new RoundCountAchievement(2000));
-		achievements.add(new RoundCountAchievement(4000));
-		achievements.add(new RoundCountAchievement(6000));
-		achievements.add(new RoundCountAchievement(10000));
-		achievements.add(new WinCountAchievement(5));
-		achievements.add(new WinCountAchievement(10));
-		achievements.add(new WinCountAchievement(300));
-		achievements.add(new WinCountAchievement(600));
-		achievements.add(new WinCountAchievement(1500));
-		achievements.add(new WinCountAchievement(3000));
-		achievements.add(new WinCountAchievement(2, true));
-		achievements.add(new WinCountAchievement(50, true));
-		achievements.add(new WinCountAchievement(150, true));
-		achievements.add(new StreakAchievement(3));
-		achievements.add(new StreakAchievement(4));
-		achievements.add(new StreakAchievement(5));
-		achievements.add(new StreakAchievement(7));
-		achievements.add(new StreakAchievement(10));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 10));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 10));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 50, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 55, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 70, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 75, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 50));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 50));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 70, 50));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 75, 50));
+		achievements.add(new RoundCountAchievement(new int[] { 10, 20, 100, 500, 1000, 2000 },
+				new int[] { 1, 2, 10, 20, 30, 40 }));
+		achievements.add(new RoundCountAchievement(new int[] { 4000, 6000, 10000 },
+				new int[] { 100, 200, 300 }));
+		achievements.add(new WinCountAchievement(new int[] { 5, 10, 100, 300 },
+				new int[] { 1, 1, 10, 20, 30 }, false));
+		achievements.add(new WinCountAchievement(new int[] { 600, 1500, 3000 },
+				new int[] { 100, 200, 300 }, false));
+		achievements.add(new WinCountAchievement(new int[] { 2, 50, 150 },
+				new int[] { 1, 10, 20 }, true));
+		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
+				new int[] { 1, 1, 1 }, 3));
+		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
+				new int[] { 10, 20, 30 }, 5));
+		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
+				new int[] { 50, 100, 100 }, 7));
+		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
+				new int[] { 100, 200, 300 }, 10));
+
+		dailyChallenges.add(new RoundCountChallenge(10));
+		dailyChallenges.add(new RoundCountChallenge(20));
+		dailyChallenges.add(new WinCountChallenge(5, false, 0, 0));
+		dailyChallenges.add(new WinCountChallenge(10, false, 0, 0));
+		dailyChallenges.add(new WinCountChallenge(1, false, 4, 0));
+		dailyChallenges.add(new WinCountChallenge(1, false, 5, 0));
+		dailyChallenges.add(new WinCountChallenge(1, true, 0, 0));
+		dailyChallenges.add(new WinCountChallenge(1, false, 0, 1));
+		dailyChallenges.add(new WinCountChallenge(1, false, 0, 3));
+		dailyChallenges.add(new StreakChallenge(2));
+		dailyChallenges.add(new StreakChallenge(3));
 	}
 
 	public static void load() {
@@ -764,29 +1039,32 @@ class Core {
 					continue;
 
 				if ("M".equals(d[0])) {
-					Date matchStart = f.parse(d[1]);
-					m = new Match(d[2], matchStart, d[3]);
-					m.pingMS = Integer.parseInt(d[4]);
+					Date matchStart = f.parse(d[2]);
+					m = new Match(d[3], matchStart, d[4]);
+					m.session = Long.parseLong(d[1]);
+					m.pingMS = Integer.parseInt(d[5]);
 					addMatch(m);
 					continue;
 				}
 				if (d.length < 8)
 					continue;
-				Round r = new Round(d[2], f.parse(d[1]), "true".equals(d[4]), m);
+				Round r = new Round(d[2], f.parse(d[1]), "true".equals(d[5]), m);
 				r.fixed = true;
-				r.history = true;
 				r.start = f.parse(d[1]); // 本当の start とは違う
-				if (d[4].length() > 0)
-					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[4]));
+				if (d[5].length() > 0)
+					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[5]));
 				Player p = new Player(0);
 				p.name = "YOU";
-				p.qualified = "true".equals(d[5]);
-				p.teamId = Integer.parseInt(d[6]);
-				if (d.length > 7)
-					r.teamScore = Core.intArrayFromString(d[7]);
+				p.qualified = "true".equals(d[6]);
+				p.disabled = "true".equals(d[7]);
+				p.teamId = Integer.parseInt(d[9]);
+				if (d.length > 10)
+					r.teamScore = Core.intArrayFromString(d[10]);
 				r.add(p);
 				rounds.add(r);
 				r.playerCount = Integer.parseInt(d[3]);
+				r.qualifiedCount = Integer.parseInt(d[4]);
+				r.playerCountAdd = Integer.parseInt(d[8]);
 			}
 		} catch (Exception ex) {
 			ex.printStackTrace();
@@ -806,13 +1084,15 @@ class Core {
 					// write match line
 					out.print("M"); // 0
 					out.print("\t");
-					out.print(f.format(currentMatch.start)); // 0
+					out.print(currentMatch.session); // 1
 					out.print("\t");
-					out.print(currentMatch.name); // 1
+					out.print(f.format(currentMatch.start)); // 2
 					out.print("\t");
-					out.print(currentMatch.ip); // 2
+					out.print(currentMatch.name); // 3
 					out.print("\t");
-					out.print(currentMatch.pingMS); // 3
+					out.print(currentMatch.ip); // 4
+					out.print("\t");
+					out.print(currentMatch.pingMS); // 5
 					out.println();
 				}
 				Player p = r.getMe();
@@ -826,18 +1106,24 @@ class Core {
 				out.print("\t");
 				out.print(r.playerCount); // 3
 				out.print("\t");
+				out.print(r.qualifiedCount); // 4
+				out.print("\t");
 				if (r.myFinish != null)
-					out.print(r.getTime(r.myFinish)); // 4
+					out.print(r.getTime(r.myFinish)); // 5
 				else if (r.end != null)
-					out.print(r.getTime(r.end)); // 4
+					out.print(r.getTime(r.end)); // 5
 
 				out.print("\t");
-				out.print(p.isQualified()); // 5
+				out.print(p.isQualified()); // 6
 				out.print("\t");
-				out.print(p.teamId); // 6
+				out.print(p.disabled); // 7
+				out.print("\t");
+				out.print(r.playerCountAdd); // 8
+				out.print("\t");
+				out.print(p.teamId); // 9
 				out.print("\t");
 				if (r.teamScore != null)
-					out.print(Arrays.toString(r.teamScore)); // 7
+					out.print(Arrays.toString(r.teamScore)); // 10
 				out.println();
 			}
 		} catch (IOException ex) {
@@ -878,43 +1164,62 @@ class Core {
 	}
 
 	// 新しい順にする
-	public static List<Round> filtered(RoundFilter f) {
+	public static List<Round> filter(RoundFilter f) {
+		return filter(f, 0, false);
+	}
+
+	public static List<Round> filter(RoundFilter f, int limit, boolean cacheUpdate) {
 		List<Round> result = new ArrayList<>();
-		for (ListIterator<Round> i = rounds.listIterator(rounds.size()); i.hasPrevious();) {
-			Round r = i.previous();
-			if (f != null && !f.isEnabled(r))
-				continue;
-			result.add(r);
+		int c = 0;
+		synchronized (listLock) {
+			for (ListIterator<Round> i = rounds.listIterator(rounds.size()); i.hasPrevious();) {
+				Round r = i.previous();
+				if (f != null && !f.isEnabled(r))
+					continue;
+				result.add(r);
+				c += 1;
+				if (limit > 0 && c >= limit)
+					break;
+			}
 		}
+		if (cacheUpdate)
+			filtered = result;
 		return result;
 	}
 
 	public static void updateStats() {
 		synchronized (listLock) {
 			stat.reset();
-			int c = 0;
-			for (Round r : filtered(filter)) {
-				if (!r.fixed)
-					continue;
-
-				// ignore except the fall ball
-				if (!r.isFallBall())
+			for (Round r : filter(filter, limit, true)) {
+				if (!r.fixed || r.getSubstanceQualifiedCount() == 0)
 					continue;
 
 				// このラウンドの参加者の結果を反映
 				for (Player p : r.byId.values()) {
 					if (!"YOU".equals(p.name))
 						continue;
-					if (!r.history)
+					if (r.match.session == Core.currentSession)
 						stat.participationCount += 1; // 参加 round 数
 					stat.totalParticipationCount += 1; // 参加 round 数
 					stat.setWin(r, p.isQualified(), 1);
 				}
-				c += 1;
-				if (limit > 0 && c >= limit)
-					return;
 			}
 		}
+	}
+
+	public static void updateAchivements() {
+		for (Achievement a : achievements) {
+			a.update();
+		}
+	}
+
+	public static List<Challenge> getChallenges(int dayKey) {
+		Random random = new Random(dayKey);
+
+		List<Challenge> result = new ArrayList<>();
+		for (int i = 0; i < 3; i += 1)
+			result.add(dailyChallenges.get(random.nextInt(dailyChallenges.size())));
+		return result;
 	}
 
 	static class PlayerComparator implements Comparator<Player> {
@@ -954,11 +1259,14 @@ class FGReader extends TailerListenerAdapter {
 		void roundDone();
 	}
 
+	File log;
 	Tailer tailer;
 	Thread thread;
 	Listener listener;
 
 	public FGReader(File log, Listener listener) {
+		this.log = log;
+		updateCreationiTime();
 		tailer = new Tailer(log, StandardCharsets.UTF_8, this, 400, false, false, 8192);
 		this.listener = listener;
 	}
@@ -1048,6 +1356,16 @@ class FGReader extends TailerListenerAdapter {
 		return new Date();
 	}
 
+	private void updateCreationiTime() {
+		try {
+			BasicFileAttributes attr = Files.readAttributes(log.toPath(), BasicFileAttributes.class);
+			FileTime fileTime = attr.creationTime();
+			Core.currentSession = fileTime.to(TimeUnit.SECONDS);
+		} catch (IOException ex) {
+			// handle exception
+		}
+	}
+
 	private void parseLine(String line) {
 		Round r = Core.getCurrentRound();
 		/*
@@ -1093,8 +1411,10 @@ class FGReader extends TailerListenerAdapter {
 					} catch (IOException e) {
 						e.printStackTrace();
 					}
+					updateCreationiTime();
 				}
 			}
+			match.session = Core.currentSession;
 			listener.showUpdated();
 		}
 		m = patternLocalPlayerId.matcher(line);
@@ -1295,6 +1615,7 @@ class FGReader extends TailerListenerAdapter {
 							break;
 						}
 						qualifiedCount += 1;
+						r.qualifiedCount += 1;
 						player.ranking = qualifiedCount;
 						System.out.println("Qualified " + player + " rank=" + player.ranking + " " + player.score);
 
@@ -1364,6 +1685,8 @@ class FGReader extends TailerListenerAdapter {
 							p.teamId = Boolean.TRUE == p.qualified ? 1 : 0;
 					}
 				}
+				// fallball 専用処理
+				r.playerCountAdd = r.playerCount < 20 ? -r.playerCount % 2 : 0; // デフォルトで20以下奇数時は -1 補正する。
 				Core.getCurrentMatch().end = getTime(line);
 				// 優勝画面に行ったらそのラウンドをファイナル扱いとする
 				// final マークがつかないファイナルや、通常ステージで一人生き残り優勝のケースを補填するためだが
@@ -1431,7 +1754,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		// default values
 		String v = prop.getProperty("LANGUAGE");
 		Core.LANG = v == null ? Locale.getDefault() : new Locale(v);
-		Core.RES = ResourceBundle.getBundle("res", Core.LANG);
+		Core.RES = ResourceBundle.getBundle("res", Core.LANG, new UTF8Control());
 
 		v = prop.getProperty("FONT_SIZE_BASE");
 		FONT_SIZE_BASE = v == null ? 12 : Integer.parseInt(v, 10);
@@ -1460,15 +1783,11 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		frame.setVisible(true);
 	}
 
-	JLabel myStatLabel;
 	JLabel pingLabel;
-	JList<Match> matchSel;
 	JList<Round> roundsSel;
-	JTextPane roundDetailArea;
-	JTextPane rankingArea;
+	JTextPane statsArea;
 	JComboBox<RoundFilter> filterSel;
 	JComboBox<Integer> limitSel;
-	JLabel rankingDescLabel;
 	boolean ignoreSelEvent;
 
 	static final int LINE1_Y = 10;
@@ -1485,50 +1804,10 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
 		label.setSize(200, 20);
 		p.add(label);
-		JLabel totalRankingLabel = label;
+		JLabel statsLabel = label;
 
-		filterSel = new JComboBox<RoundFilter>();
-		filterSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
-		l.putConstraint(SpringLayout.WEST, filterSel, 10, SpringLayout.EAST, label);
-		l.putConstraint(SpringLayout.NORTH, filterSel, LINE1_Y, SpringLayout.NORTH, p);
-		filterSel.setSize(95, 20);
-		filterSel.addItem(new AllRoundFilter());
-		filterSel.addItem(new CustomRoundFilter());
-		filterSel.addItem(new NotCustomRoundFilter());
-		filterSel.addItemListener(ev -> {
-			Core.filter = (RoundFilter) filterSel.getSelectedItem();
-			Core.updateStats();
-			displayRanking();
-		});
-		p.add(filterSel);
-
-		limitSel = new JComboBox<Integer>();
-		limitSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
-		l.putConstraint(SpringLayout.WEST, limitSel, 4, SpringLayout.EAST, filterSel);
-		l.putConstraint(SpringLayout.NORTH, limitSel, LINE1_Y, SpringLayout.NORTH, p);
-		limitSel.setSize(44, 20);
-		limitSel.addItem(0);
-		limitSel.addItem(10);
-		limitSel.addItem(20);
-		limitSel.addItem(50);
-		limitSel.addItem(100);
-		limitSel.addItem(500);
-		limitSel.addItemListener(ev -> {
-			Core.limit = (int) limitSel.getSelectedItem();
-			Core.updateStats();
-			displayRanking();
-		});
-		p.add(limitSel);
-		label = new JLabel(Core.RES.getString("moreThanOneMatch"));
-		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
-		l.putConstraint(SpringLayout.WEST, label, 4, SpringLayout.EAST, limitSel);
-		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
-		label.setSize(120, 20);
-		p.add(label);
-
-		final int COL2_X = COL1_X + FONT_SIZE_RANK * 25 + 10;
-		final int COL3_X = COL2_X + 130;
-		final int COL4_X = COL3_X + 160;
+		final int COL2_X = COL1_X + FONT_SIZE_RANK * 15 + 10;
+		final int COL3_X = COL2_X + 340;
 
 		label = new JLabel(Core.RES.getString("matchList"));
 		label.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE + 2));
@@ -1542,24 +1821,11 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
 		label.setSize(100, 20);
 		p.add(label);
-		label = new JLabel(Core.RES.getString("roundDetails"));
-		label.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE + 2));
-		l.putConstraint(SpringLayout.WEST, label, COL4_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
-		label.setSize(100, 20);
-		p.add(label);
 
 		// under
-		myStatLabel = new JLabel("");
-		myStatLabel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_RANK));
-		l.putConstraint(SpringLayout.WEST, myStatLabel, COL1_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.SOUTH, myStatLabel, -4, SpringLayout.SOUTH, p);
-		myStatLabel.setPreferredSize(new Dimension(FONT_SIZE_RANK * 16, FONT_SIZE_RANK + 10));
-		p.add(myStatLabel);
-
 		pingLabel = new JLabel("");
 		pingLabel.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_RANK));
-		l.putConstraint(SpringLayout.WEST, pingLabel, 40, SpringLayout.EAST, myStatLabel);
+		l.putConstraint(SpringLayout.WEST, pingLabel, 10, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.SOUTH, pingLabel, -4, SpringLayout.SOUTH, p);
 		pingLabel.setPreferredSize(new Dimension(FONT_SIZE_RANK * 60, FONT_SIZE_RANK + 10));
 		p.add(pingLabel);
@@ -1597,37 +1863,71 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		JScrollPane scroller;
 
-		rankingArea = new NoWrapJTextPane(rdoc);
-		rankingArea.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_RANK));
-		rankingArea.setMargin(new Insets(8, 8, 8, 8));
-		p.add(scroller = new JScrollPane(rankingArea));
+		statsArea = new NoWrapJTextPane(rdoc);
+		statsArea.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_RANK));
+		statsArea.setMargin(new Insets(8, 8, 8, 8));
+		p.add(scroller = new JScrollPane(statsArea));
 		l.putConstraint(SpringLayout.WEST, scroller, COL1_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, totalRankingLabel);
+		l.putConstraint(SpringLayout.EAST, scroller, COL2_X - 10, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
+		l.putConstraint(SpringLayout.SOUTH, scroller, -100, SpringLayout.SOUTH, p);
+
+		filterSel = new JComboBox<RoundFilter>();
+		filterSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.WEST, filterSel, COL1_X, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, filterSel, -90, SpringLayout.SOUTH, p);
+		filterSel.setSize(95, 20);
+		filterSel.addItem(new AllRoundFilter());
+		filterSel.addItem(new CustomRoundFilter());
+		filterSel.addItem(new NotCustomRoundFilter());
+		filterSel.addItem(new FewAllyCustomRoundFilter());
+		filterSel.addItem(new ManyAllyCustomRoundFilter());
+		filterSel.addItemListener(ev -> {
+			Core.filter = (RoundFilter) filterSel.getSelectedItem();
+			Core.updateStats();
+			updateRounds();
+		});
+		p.add(filterSel);
+
+		limitSel = new JComboBox<Integer>();
+		limitSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.WEST, limitSel, COL1_X, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, limitSel, -60, SpringLayout.SOUTH, p);
+		limitSel.setSize(44, 20);
+		limitSel.addItem(0);
+		limitSel.addItem(10);
+		limitSel.addItem(20);
+		limitSel.addItem(50);
+		limitSel.addItem(100);
+		limitSel.addItem(500);
+		limitSel.addItemListener(ev -> {
+			Core.limit = (int) limitSel.getSelectedItem();
+			Core.updateStats();
+			updateRounds();
+		});
+		p.add(limitSel);
+		label = new JLabel(Core.RES.getString("moreThanOneMatch"));
+		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.WEST, label, 6, SpringLayout.EAST, limitSel);
+		l.putConstraint(SpringLayout.NORTH, label, 2, SpringLayout.NORTH, limitSel);
+		label.setSize(120, 20);
+		p.add(label);
+
+		AchivementPanel achivementPanel = new AchivementPanel();
+		p.add(scroller = new JScrollPane(achivementPanel));
+		l.putConstraint(SpringLayout.WEST, scroller, COL2_X, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.EAST, scroller, COL3_X - 10, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
 		l.putConstraint(SpringLayout.SOUTH, scroller, -30, SpringLayout.SOUTH, p);
 		scroller.setPreferredSize(new Dimension(FONT_SIZE_RANK * 25, 0));
-		JScrollPane rankingAreaScroller = scroller;
-
-		matchSel = new JList<Match>(new DefaultListModel<>());
-		matchSel.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
-		p.add(scroller = new JScrollPane(matchSel));
-		l.putConstraint(SpringLayout.WEST, scroller, 10, SpringLayout.EAST, rankingAreaScroller);
-		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, totalRankingLabel);
-		l.putConstraint(SpringLayout.SOUTH, scroller, -30, SpringLayout.SOUTH, p);
-		scroller.setPreferredSize(new Dimension(120, 0));
-		matchSel.addListSelectionListener((ev) -> {
-			if (ev.getValueIsAdjusting()) {
-				// The user is still manipulating the selection.
-				return;
-			}
-			matchSelected(getSelectedMatch());
-		});
 
 		roundsSel = new JList<Round>(new DefaultListModel<>());
-		roundsSel.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
+		roundsSel.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
 		p.add(scroller = new JScrollPane(roundsSel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL3_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, totalRankingLabel);
-		l.putConstraint(SpringLayout.SOUTH, scroller, -30, SpringLayout.SOUTH, p);
+		l.putConstraint(SpringLayout.EAST, scroller, -10, SpringLayout.EAST, p);
+		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
+		l.putConstraint(SpringLayout.SOUTH, scroller, -60, SpringLayout.SOUTH, p);
 		scroller.setPreferredSize(new Dimension(150, 0));
 		roundsSel.addListSelectionListener((ev) -> {
 			if (ev.getValueIsAdjusting()) {
@@ -1637,14 +1937,16 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			roundSelected(getSelectedRound());
 		});
 
+		/*
 		roundDetailArea = new NoWrapJTextPane(doc);
 		roundDetailArea.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_DETAIL));
 		roundDetailArea.setMargin(new Insets(8, 8, 8, 8));
 		p.add(scroller = new JScrollPane(roundDetailArea));
 		l.putConstraint(SpringLayout.WEST, scroller, COL4_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, -10, SpringLayout.EAST, p);
-		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, totalRankingLabel);
+		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, totalstatsLabel);
 		l.putConstraint(SpringLayout.SOUTH, scroller, -60, SpringLayout.SOUTH, p);
+		*/
 
 		JButton removeMemberFromRoundButton = new JButton(Core.RES.getString("removeMemberFromRoundButton"));
 		removeMemberFromRoundButton.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
@@ -1653,6 +1955,14 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		removeMemberFromRoundButton.setPreferredSize(new Dimension(180, FONT_SIZE_BASE + 8));
 		removeMemberFromRoundButton.addActionListener(ev -> removePlayerOnCurrentRound());
 		p.add(removeMemberFromRoundButton);
+
+		JButton adjustPlayerCountButton = new JButton(Core.RES.getString("adjustPlayerCountButton"));
+		adjustPlayerCountButton.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.WEST, adjustPlayerCountButton, 10, SpringLayout.EAST, removeMemberFromRoundButton);
+		l.putConstraint(SpringLayout.NORTH, adjustPlayerCountButton, 10, SpringLayout.SOUTH, scroller);
+		adjustPlayerCountButton.setPreferredSize(new Dimension(180, FONT_SIZE_BASE + 8));
+		adjustPlayerCountButton.addActionListener(ev -> adjustPlayerCountOnCurrentRound());
+		p.add(adjustPlayerCountButton);
 
 		this.addWindowListener(new WindowAdapter() {
 			public void windowClosing(WindowEvent e) {
@@ -1688,7 +1998,9 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		});
 
 		Core.updateStats();
-		displayRanking();
+		Core.updateAchivements();
+		updateRounds();
+
 		// start log read
 		reader = new FGReader(
 				new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player.log"), this);
@@ -1696,17 +2008,6 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	}
 
 	void updateMatches() {
-		int prevSelectedIndex = matchSel.getSelectedIndex();
-		DefaultListModel<Match> model = (DefaultListModel<Match>) matchSel.getModel();
-		model.clear();
-		model.addElement(new Match("ALL", null, null));
-		synchronized (Core.listLock) {
-			for (Match m : Core.matches) {
-				model.addElement(m);
-			}
-			matchSel.setSelectedIndex(prevSelectedIndex <= 0 ? 0 : model.getSize() - 1);
-			matchSel.ensureIndexIsVisible(matchSel.getSelectedIndex());
-		}
 		displayFooter();
 	}
 
@@ -1714,36 +2015,20 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		DefaultListModel<Round> model = (DefaultListModel<Round>) roundsSel.getModel();
 		model.clear();
 		synchronized (Core.listLock) {
-			Match m = getSelectedMatch();
-			for (Round r : m == null ? Core.rounds : m.rounds) {
-				if (r.isFallBall()) {
+			for (Round r : Core.filtered) {
+				if (r.isFallBall() && r.getMe() != null) {
 					model.addElement(r);
 				}
 			}
 			roundsSel.setSelectedIndex(model.size() - 1);
 			roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
-			displayRanking();
+			displayStats();
 		}
 	}
 
-	void matchSelected(Match m) {
-		DefaultListModel<Round> model = (DefaultListModel<Round>) roundsSel.getModel();
-		model.clear();
-		synchronized (Core.listLock) {
-			for (Round r : m == null ? Core.rounds : m.rounds) {
-				if (r.isFallBall()) {
-					model.addElement(r);
-				}
-			}
-		}
-		roundsSel.setSelectedIndex(model.size() - 1);
-		roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
-		displayFooter();
-	}
-
-	private void appendToRanking(String str, String style) {
+	private void appendTostats(String str, String style) {
 		style = style == null ? StyleContext.DEFAULT_STYLE : style;
-		StyledDocument doc = rankingArea.getStyledDocument();
+		StyledDocument doc = statsArea.getStyledDocument();
 		try {
 			doc.insertString(doc.getLength(), str + "\n", doc.getStyle(style));
 		} catch (BadLocationException e) {
@@ -1751,6 +2036,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		}
 	}
 
+	/*
 	private void appendToRoundDetail(String str, String style) {
 		style = style == null ? StyleContext.DEFAULT_STYLE : style;
 		StyledDocument doc = roundDetailArea.getStyledDocument();
@@ -1760,6 +2046,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			e.printStackTrace();
 		}
 	}
+	*/
 
 	void roundSelected(Round r) {
 		refreshRoundDetail(r);
@@ -1781,25 +2068,20 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	@Override
 	public void roundUpdated() {
+		/*
 		SwingUtilities.invokeLater(() -> {
 			if (Core.getCurrentRound() == getSelectedRound())
 				refreshRoundDetail(getSelectedRound());
 		});
+		*/
 	}
 
 	@Override
 	public void roundDone() {
 		SwingUtilities.invokeLater(() -> {
-			Core.updateStats();
+			Core.updateAchivements();
 			updateRounds();
 		});
-	}
-
-	Match getSelectedMatch() {
-		Match m = matchSel.getSelectedValue();
-		if (m == null || "ALL".equals(m.name))
-			return null;
-		return m;
 	}
 
 	Round getSelectedRound() {
@@ -1808,40 +2090,40 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	private void removePlayerOnCurrentRound() {
 		Round r = getSelectedRound();
-		Core.rounds.remove(r);
+		Player p = r.getMe();
+		p.disabled = !p.disabled;
+		r.playerCount += p.disabled ? -1 : 1;
+		if (p.isQualified())
+			r.qualifiedCount += p.disabled ? -1 : 1;
+		r.playerCountAdd = r.playerCount < 20 ? -r.playerCount % 2 : 0; // デフォルトで20以下奇数時は -1 補正する。
 		updateRounds();
 		Core.updateStats();
-		displayRanking();
+		displayStats();
+	}
+
+	private void adjustPlayerCountOnCurrentRound() {
+		Round r = getSelectedRound();
+		if (r.playerCountAdd != 0)
+			r.playerCountAdd = 0;
+		else
+			r.playerCountAdd = -r.playerCount % 2;
+		updateRounds();
+		Core.updateStats();
+		displayStats();
 	}
 
 	void refreshRoundDetail(Round r) {
-		roundDetailArea.setText("");
 		if (r == null) {
 			return;
 		}
-		if (r.topFinish != null) {
-			long t = r.getTime(r.topFinish);
-			appendToRoundDetail("TOP: " + Core.pad0((int) (t / 60000)) + ":" + Core.pad0((int) (t % 60000 / 1000))
-					+ "." + String.format("%03d", t % 1000), "bold");
-		}
-		if (r.myFinish != null && r.byId.get(r.myPlayerId) != null) {
-			long t = r.getTime(r.myFinish);
-			appendToRoundDetail("OWN: " + Core.pad0((int) (t / 60000)) + ":" + Core.pad0((int) (t % 60000 / 1000))
-					+ "." + String.format("%03d", t % 1000) + " #" + r.byId.get(r.myPlayerId).ranking, "bold");
-		}
-		if (r.end != null) {
-			long t = r.getTime(r.end);
-			appendToRoundDetail("END: " + Core.pad0((int) (t / 60000)) + ":" + Core.pad0((int) (t % 60000 / 1000))
-					+ "." + String.format("%03d", t % 1000), "bold");
-		}
-		if (r.teamScore != null) {
-			appendToRoundDetail(Arrays.toString(r.teamScore), "bold");
-		}
-		if (r.isFinal()) {
-			appendToRoundDetail("********** FINAL **********", "bold");
-		}
+		System.out.println(r.topFinish);
+		System.out.println(r.myFinish);
+		System.out.println(r.end);
+		System.out.println(r.fixed);
+		System.out.println(r.qualifiedCount);
+		System.out.println(r.playerCount);
+		System.out.println(Arrays.toString(r.teamScore));
 		synchronized (Core.listLock) {
-			appendToRoundDetail("rank  score  pt   name", null);
 			for (Player p : r.byRank()) {
 				StringBuilder buf = new StringBuilder();
 				buf.append(p.qualified == null ? "　" : p.qualified ? "○" : "✕");
@@ -1849,61 +2131,36 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				buf.append(Core.pad(p.score)).append("pt(").append(p.finalScore < 0 ? "  " : Core.pad(p.finalScore))
 						.append(")").append(" ").append(p.partyId != 0 ? Core.pad(p.partyId) + " " : "   ");
 				buf.append(r.myPlayerId == p.id ? "★" : "　").append(p);
-				appendToRoundDetail(new String(buf), null);
+				System.out.println(new String(buf));
 			}
 		}
-		roundDetailArea.setCaretPosition(0);
 	}
 
-	void displayRanking() {
-		rankingArea.setText("");
-		myStatLabel.setText("");
+	void displayStats() {
+		statsArea.setText("");
 
 		PlayerStat stat = Core.stat;
-		appendToRanking("total: " + stat.totalWinCount + "/" + stat.totalParticipationCount + " ("
+		appendTostats(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
+				+ stat.getRate() + "%)", "bold");
+		appendTostats("total: " + stat.totalWinCount + "/" + stat.totalParticipationCount + " ("
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
-		int no = 0;
-		for (ListIterator<Round> i = Core.rounds.listIterator(Core.rounds.size()); i.hasPrevious();) {
-			Round r = i.previous();
-			if (!r.isFallBall())
-				continue;
-			if (Core.filter != null && !Core.filter.isEnabled(r))
-				continue;
-			Player p = r.getMe();
-			if (p == null)
-				continue;
-			no += 1;
-			StringBuilder buf = new StringBuilder();
-			buf.append(Core.pad(no));
-			buf.append(" ").append(Core.pad(r.playerCount));
-			buf.append(" ").append(Core.pad(r.getSubstancePlayerCount()));
-			buf.append(" ").append(p.qualified == Boolean.TRUE ? "○" : "☓");
-			buf.append(" ").append(Core.pad(r.getTeamScore(p.teamId))).append(":")
-					.append(r.getTeamScore(1 - p.teamId));
-			if (r.myFinish != null)
-				buf.append(" ").append((double) r.getTime(r.myFinish) / 1000);
-			appendToRanking(new String(buf), null);
-			if (Core.limit > 0 && no >= Core.limit)
-				break;
-		}
-		appendToRanking("ACHIVEMENTS", "bold");
-		for (Achievement a : Core.achievements) {
-			appendToRanking((a.isCompleted() ? "○" : "　") + a, null);
+		//appendTostats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
+
+		appendTostats("Today's challanges", "bold");
+		int dayKey = Core.toDateKey(new Date());
+		for (Challenge c : Core.getChallenges(dayKey)) {
+			boolean complete = c.isComplete(dayKey);
+			appendTostats((complete ? "○" : "  ") + c.toString(), complete ? "bold" : null);
 		}
 
-		rankingArea.setCaretPosition(0);
-		// footer
-		myStatLabel.setText(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
-				+ stat.getRate() + "%)");
+		statsArea.setCaretPosition(0);
 	}
 
 	static final SimpleDateFormat f = new SimpleDateFormat("HH:mm:ss", Locale.JAPAN);
 
 	void displayFooter() {
 		String text = "";
-		Match m = getSelectedMatch();
-		if (m == null)
-			m = Core.getCurrentMatch();
+		Match m = Core.getCurrentMatch();
 		if (m == null)
 			return;
 		if (m.start != null) {
@@ -1919,6 +2176,16 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			text += " " + server.get("country") + " " + server.get("regionName") + " " + server.get("city") + " "
 					+ server.get("timezone");
 		pingLabel.setText(text);
+	}
+}
+
+class AchivementPanel extends JPanel {
+	AchivementPanel() {
+		Box b = Box.createVerticalBox();
+		add(b);
+		for (Achievement a : Core.achievements) {
+			b.add(a.panel);
+		}
 	}
 }
 
@@ -2001,5 +2268,37 @@ class ServerSocketMutex {
 		} catch (IOException e) {
 		}
 		ss = null;
+	}
+}
+
+class UTF8Control extends Control {
+	public ResourceBundle newBundle(String baseName, Locale locale, String format, ClassLoader loader, boolean reload)
+			throws IllegalAccessException, InstantiationException, IOException {
+		// The below is a copy of the default implementation.
+		String bundleName = toBundleName(baseName, locale);
+		String resourceName = toResourceName(bundleName, "properties");
+		ResourceBundle bundle = null;
+		InputStream stream = null;
+		if (reload) {
+			URL url = loader.getResource(resourceName);
+			if (url != null) {
+				URLConnection connection = url.openConnection();
+				if (connection != null) {
+					connection.setUseCaches(false);
+					stream = connection.getInputStream();
+				}
+			}
+		} else {
+			stream = loader.getResourceAsStream(resourceName);
+		}
+		if (stream != null) {
+			try {
+				// Only this line is changed to make it to read properties files as UTF-8.
+				bundle = new PropertyResourceBundle(new InputStreamReader(stream, "UTF-8"));
+			} finally {
+				stream.close();
+			}
+		}
+		return bundle;
 	}
 }
