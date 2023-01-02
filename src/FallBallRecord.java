@@ -143,11 +143,11 @@ class Player {
 
 class Round {
 	final Match match;
-	final Date id;
 	final String name;
 	boolean isFinal;
 	String roundName2; // より詳細な内部名
 	boolean fixed; // ステージ完了まで読み込み済み
+	int no; // 0 origin
 	Date start;
 	Date end;
 	Date topFinish;
@@ -160,9 +160,10 @@ class Round {
 	Map<String, Player> byName = new HashMap<String, Player>();
 	Map<Integer, Player> byId = new HashMap<Integer, Player>();
 
-	public Round(String name, Date id, boolean isFinal, Match match) {
+	public Round(String name, int no, Date id, boolean isFinal, Match match) {
 		this.name = name;
-		this.id = id;
+		this.no = no;
+		start = id;
 		this.isFinal = isFinal;
 		this.match = match;
 	}
@@ -216,7 +217,7 @@ class Round {
 	}
 
 	public boolean isDate(int dayKey) {
-		return dayKey == Core.toDateKey(id);
+		return dayKey == Core.toDateKey(start);
 	}
 
 	public boolean isFallBall() {
@@ -316,7 +317,7 @@ class Round {
 
 	@Override
 	public int hashCode() {
-		return id.hashCode();
+		return start.hashCode();
 	}
 
 	@Override
@@ -324,11 +325,10 @@ class Round {
 		if (this == obj)
 			return true;
 		Round o = (Round) obj;
-		return id.equals(o.id);
+		return start.equals(o.start);
 	}
 
-	@Override
-	public String toString() {
+	public String toOverviewString() {
 		Player p = getMe();
 		StringBuilder buf = new StringBuilder();
 		if (start == null)
@@ -353,7 +353,12 @@ class Round {
 		if (p.disabled)
 			buf.append(" ☓");
 		return new String(buf);
-		//		return getDef().getName();
+	}
+
+	@Override
+	public String toString() {
+		return toOverviewString();
+		// return getDef().getName();
 	}
 }
 
@@ -1045,27 +1050,26 @@ class Core {
 					addMatch(m);
 					continue;
 				}
-				if (d.length < 11)
+				if (!"r".equals(d[0]) || d.length < 13)
 					continue;
-				Round r = new Round(d[2], f.parse(d[1]), false, m);
-				r.roundName2 = d[3];
+				Round r = new Round(d[3], Integer.parseInt(d[2]), f.parse(d[1]), "true".equals(d[5]), m);
+				r.roundName2 = d[4];
 				r.fixed = true;
-				r.start = f.parse(d[1]); // 本当の start とは違う
 
-				r.qualifiedCount = Integer.parseInt(d[5]);
-				if (d[6].length() > 0)
-					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[6]));
+				r.qualifiedCount = Integer.parseInt(d[7]);
+				if (d[8].length() > 0)
+					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
 				Player p = new Player(0);
 				p.name = "YOU";
-				p.qualified = "true".equals(d[7]);
-				p.disabled = "true".equals(d[8]);
-				r.playerCountAdd = Integer.parseInt(d[9]);
-				p.teamId = Integer.parseInt(d[10]);
-				if (d.length > 11)
-					r.teamScore = Core.intArrayFromString(d[11]);
+				p.qualified = "true".equals(d[9]);
+				p.disabled = "true".equals(d[10]);
+				r.playerCountAdd = Integer.parseInt(d[11]);
+				p.teamId = Integer.parseInt(d[12]);
+				if (d.length > 13)
+					r.teamScore = Core.intArrayFromString(d[13]);
 				r.add(p);
 				rounds.add(r);
-				r.playerCount = Integer.parseInt(d[4]);
+				r.playerCount = Integer.parseInt(d[6]);
 			}
 		} catch (Exception ex) {
 			ex.printStackTrace();
@@ -1076,6 +1080,8 @@ class Core {
 		try (PrintWriter out = new PrintWriter(
 				new OutputStreamWriter(new FileOutputStream("stats.tsv"), StandardCharsets.UTF_8),
 				false)) {
+			out.println(
+					"type\tstart\tname\tplayers\tqualifiedCount\ttime\tqualified\tdisabled\tplayerCoundAdd\tteam\tteamScore");
 			Match currentMatch = null;
 			for (Round r : rounds) {
 				if (!r.isFallBall())
@@ -1101,32 +1107,36 @@ class Core {
 					continue;
 				out.print("r"); // 0
 				out.print("\t");
-				out.print(f.format(r.id)); // 1
+				out.print(f.format(r.start)); // 1
 				out.print("\t");
-				out.print(r.name); // 2
+				out.print(r.no); // 2
 				out.print("\t");
-				out.print(r.roundName2); // 3
+				out.print(r.name); // 3
 				out.print("\t");
-				out.print(r.playerCount); // 4
+				out.print(r.roundName2); // 4
 				out.print("\t");
-				out.print(r.qualifiedCount); // 5
+				out.print(r.isFinal()); // 5
+				out.print("\t");
+				out.print(r.playerCount); // 6
+				out.print("\t");
+				out.print(r.qualifiedCount); // 7
 				out.print("\t");
 				if (r.myFinish != null)
-					out.print(r.getTime(r.myFinish)); // 6
+					out.print(r.getTime(r.myFinish)); // 8
 				else if (r.end != null)
-					out.print(r.getTime(r.end)); // 6
+					out.print(r.getTime(r.end)); // 8
 
 				out.print("\t");
-				out.print(p.isQualified()); // 7
+				out.print(p.isQualified()); // 9
 				out.print("\t");
-				out.print(p.disabled); // 8
+				out.print(p.disabled); // 10
 				out.print("\t");
-				out.print(r.playerCountAdd); // 9
+				out.print(r.playerCountAdd); // 11
 				out.print("\t");
-				out.print(p.teamId); // 10
+				out.print(p.teamId); // 12
 				out.print("\t");
 				if (r.teamScore != null)
-					out.print(Arrays.toString(r.teamScore)); // 11
+					out.print(Arrays.toString(r.teamScore)); // 13
 				out.println();
 			}
 		} catch (IOException ex) {
@@ -1433,7 +1443,8 @@ class FGReader extends TailerListenerAdapter {
 			if (m.find()) {
 				String roundName = m.group(1);
 				//long frame = Long.parseUnsignedLong(m.group(2)); // FIXME: round id のほうが適切
-				Core.addRound(new Round(roundName, getTime(line), isFinal, Core.getCurrentMatch()));
+				Core.addRound(new Round(roundName, Core.getCurrentMatch().rounds.size(), getTime(line), isFinal,
+						Core.getCurrentMatch()));
 				r = Core.getCurrentRound();
 				System.out.println("DETECT STARTING " + roundName);
 				//readState = ReadState.MEMBER_DETECTING;
@@ -1907,8 +1918,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(120, 20);
 		p.add(label);
 
-		AchivementPanel achivementPanel = new AchivementPanel();
-		p.add(scroller = new JScrollPane(achivementPanel));
+		AchievementPanel AchievementPanel = new AchievementPanel();
+		p.add(scroller = new JScrollPane(AchievementPanel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL2_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, COL3_X - 10, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
@@ -2173,8 +2184,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	}
 }
 
-class AchivementPanel extends JPanel {
-	AchivementPanel() {
+class AchievementPanel extends JPanel {
+	AchievementPanel() {
 		Box b = Box.createVerticalBox();
 		add(b);
 		for (Achievement a : Core.achievements) {
