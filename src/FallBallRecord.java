@@ -28,9 +28,6 @@ import java.net.ServerSocket;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileTime;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -54,7 +51,6 @@ import java.util.ResourceBundle.Control;
 import java.util.TimeZone;
 import java.util.Timer;
 import java.util.TimerTask;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -91,6 +87,7 @@ class PlayerStat {
 	int winStreak;
 	int totalParticipationCount; // rate 分母。
 	int totalWinCount; // rate 分子。
+	int totalPoint;
 
 	public double getRate() {
 		return Core.calRate(winCount, participationCount);
@@ -98,7 +95,7 @@ class PlayerStat {
 
 	public boolean setWin(Round r, boolean win, int score) {
 		if (win) {
-			if (r.match.session == Core.currentSession)
+			if (r.match.isCurrentSession())
 				winCount += 1;
 			totalWinCount += 1;
 			winStreak += 1;
@@ -362,7 +359,7 @@ class Round {
 
 // 一つのショー
 class Match {
-	long session; // Player.log の createdTime
+	long session; // 起動日時ベース
 	boolean fixed; // 完了まで読み込み済み
 	String name;
 	String ip;
@@ -376,6 +373,10 @@ class Match {
 		this.name = name;
 		this.start = start;
 		this.ip = ip;
+	}
+
+	public boolean isCurrentSession() {
+		return session == Core.currentSession;
 	}
 
 	@Override
@@ -1044,25 +1045,27 @@ class Core {
 					addMatch(m);
 					continue;
 				}
-				if (d.length < 8)
+				if (d.length < 11)
 					continue;
-				Round r = new Round(d[2], f.parse(d[1]), "true".equals(d[5]), m);
+				Round r = new Round(d[2], f.parse(d[1]), false, m);
+				r.roundName2 = d[3];
 				r.fixed = true;
 				r.start = f.parse(d[1]); // 本当の start とは違う
-				if (d[5].length() > 0)
-					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[5]));
+
+				r.qualifiedCount = Integer.parseInt(d[5]);
+				if (d[6].length() > 0)
+					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[6]));
 				Player p = new Player(0);
 				p.name = "YOU";
-				p.qualified = "true".equals(d[6]);
-				p.disabled = "true".equals(d[7]);
-				p.teamId = Integer.parseInt(d[9]);
-				if (d.length > 10)
-					r.teamScore = Core.intArrayFromString(d[10]);
+				p.qualified = "true".equals(d[7]);
+				p.disabled = "true".equals(d[8]);
+				r.playerCountAdd = Integer.parseInt(d[9]);
+				p.teamId = Integer.parseInt(d[10]);
+				if (d.length > 11)
+					r.teamScore = Core.intArrayFromString(d[11]);
 				r.add(p);
 				rounds.add(r);
-				r.playerCount = Integer.parseInt(d[3]);
-				r.qualifiedCount = Integer.parseInt(d[4]);
-				r.playerCountAdd = Integer.parseInt(d[8]);
+				r.playerCount = Integer.parseInt(d[4]);
 			}
 		} catch (Exception ex) {
 			ex.printStackTrace();
@@ -1102,26 +1105,28 @@ class Core {
 				out.print("\t");
 				out.print(r.name); // 2
 				out.print("\t");
-				out.print(r.playerCount); // 3
+				out.print(r.roundName2); // 3
 				out.print("\t");
-				out.print(r.qualifiedCount); // 4
+				out.print(r.playerCount); // 4
+				out.print("\t");
+				out.print(r.qualifiedCount); // 5
 				out.print("\t");
 				if (r.myFinish != null)
-					out.print(r.getTime(r.myFinish)); // 5
+					out.print(r.getTime(r.myFinish)); // 6
 				else if (r.end != null)
-					out.print(r.getTime(r.end)); // 5
+					out.print(r.getTime(r.end)); // 6
 
 				out.print("\t");
-				out.print(p.isQualified()); // 6
+				out.print(p.isQualified()); // 7
 				out.print("\t");
-				out.print(p.disabled); // 7
+				out.print(p.disabled); // 8
 				out.print("\t");
-				out.print(r.playerCountAdd); // 8
+				out.print(r.playerCountAdd); // 9
 				out.print("\t");
-				out.print(p.teamId); // 9
+				out.print(p.teamId); // 10
 				out.print("\t");
 				if (r.teamScore != null)
-					out.print(Arrays.toString(r.teamScore)); // 10
+					out.print(Arrays.toString(r.teamScore)); // 11
 				out.println();
 			}
 		} catch (IOException ex) {
@@ -1196,7 +1201,7 @@ class Core {
 				for (Player p : r.byId.values()) {
 					if (!"YOU".equals(p.name))
 						continue;
-					if (r.match.session == Core.currentSession)
+					if (r.match.isCurrentSession())
 						stat.participationCount += 1; // 参加 round 数
 					stat.totalParticipationCount += 1; // 参加 round 数
 					stat.setWin(r, p.isQualified(), 1);
@@ -1257,14 +1262,11 @@ class FGReader extends TailerListenerAdapter {
 		void roundDone();
 	}
 
-	File log;
 	Tailer tailer;
 	Thread thread;
 	Listener listener;
 
 	public FGReader(File log, Listener listener) {
-		this.log = log;
-		updateCreationiTime();
 		tailer = new Tailer(log, StandardCharsets.UTF_8, this, 400, false, false, 8192);
 		this.listener = listener;
 	}
@@ -1304,6 +1306,8 @@ class FGReader extends TailerListenerAdapter {
 		}
 	}
 
+	static Pattern patternLaunch = Pattern
+			.compile("\\[FGClient.GlobalInitialisation\\] Active Scene is 'Init'");
 	static Pattern patternServer = Pattern
 			.compile("\\[StateConnectToGame\\] We're connected to the server! Host = ([^:]+)");
 
@@ -1354,25 +1358,19 @@ class FGReader extends TailerListenerAdapter {
 		return new Date();
 	}
 
-	private void updateCreationiTime() {
-		try {
-			BasicFileAttributes attr = Files.readAttributes(log.toPath(), BasicFileAttributes.class);
-			FileTime fileTime = attr.creationTime();
-			Core.currentSession = fileTime.to(TimeUnit.SECONDS);
-		} catch (IOException ex) {
-			// handle exception
-		}
-	}
-
 	private void parseLine(String line) {
 		Round r = Core.getCurrentRound();
+		Matcher m = patternLaunch.matcher(line);
+		if (m.find()) {
+			Core.currentSession = getTime(line).getTime();
+		}
 		/*
 		if (line.contains("[UserInfo] Player Name:")) {
 			String[] sp = line.split("Player Name: ", 2);
 			Core.myNameFull = sp[1];
 		}
 		*/
-		Matcher m = patternServer.matcher(line);
+		m = patternServer.matcher(line);
 		if (m.find()) {
 			String showName = "_";
 			String ip = m.group(1);
@@ -1409,10 +1407,8 @@ class FGReader extends TailerListenerAdapter {
 					} catch (IOException e) {
 						e.printStackTrace();
 					}
-					updateCreationiTime();
 				}
 			}
-			match.session = Core.currentSession;
 			listener.showUpdated();
 		}
 		m = patternLocalPlayerId.matcher(line);
@@ -2018,13 +2014,13 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 					model.addElement(r);
 				}
 			}
-			roundsSel.setSelectedIndex(model.size() - 1);
+			roundsSel.setSelectedIndex(0);
 			roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
 			displayStats();
 		}
 	}
 
-	private void appendTostats(String str, String style) {
+	private void appendToStats(String str, String style) {
 		style = style == null ? StyleContext.DEFAULT_STYLE : style;
 		StyledDocument doc = statsArea.getStyledDocument();
 		try {
@@ -2138,17 +2134,17 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		statsArea.setText("");
 
 		PlayerStat stat = Core.stat;
-		appendTostats(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
+		appendToStats(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
 				+ stat.getRate() + "%)", "bold");
-		appendTostats("total: " + stat.totalWinCount + "/" + stat.totalParticipationCount + " ("
+		appendToStats("total: " + stat.totalWinCount + "/" + stat.totalParticipationCount + " ("
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
-		//appendTostats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
+		//appendToStats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
 
-		appendTostats("Today's challanges", "bold");
+		appendToStats("Today's challanges", "bold");
 		int dayKey = Core.toDateKey(new Date());
 		for (Challenge c : Core.getChallenges(dayKey)) {
 			boolean complete = c.isComplete(dayKey);
-			appendTostats((complete ? "○" : "  ") + c.toString(), complete ? "bold" : null);
+			appendToStats((complete ? "○" : "  ") + c.toString(), complete ? "bold" : null);
 		}
 
 		statsArea.setCaretPosition(0);
