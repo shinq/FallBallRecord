@@ -373,7 +373,7 @@ class Match {
 		synchronized (Core.listLock) {
 			int i = rounds.indexOf(r);
 			if (i >= 0) {
-				rounds.remove(r);
+				rounds.remove(i);
 				rounds.add(i, r);
 			} else
 				rounds.add(r);
@@ -391,7 +391,7 @@ class Match {
 			winStreak = 1;
 			List<Match> matches = Core.matches;
 			if (matches.size() > 1)
-				Core.getCurrentMatch().winStreak += Core.matches.get(Core.matches.size() - 2).winStreak;
+				Core.currentMatch.winStreak += Core.matches.get(Core.matches.size() - 2).winStreak;
 		}
 	}
 
@@ -1019,6 +1019,8 @@ class Core {
 	public static String currentServerIp;
 	public static final List<Match> matches = new ArrayList<>();
 	public static final List<Round> rounds = new ArrayList<>();
+	public static Match currentMatch;
+	public static Round currentRound;
 	public static List<Round> filtered;
 	public static Map<String, Map<String, String>> servers = new HashMap<>();
 	public static final PlayerStat stat = new PlayerStat();
@@ -1081,15 +1083,14 @@ class Core {
 			Match m = null;
 			while ((line = in.readLine()) != null) {
 				String[] d = line.split("\t");
-				if (d.length < 5)
+				if (d.length < 6)
 					continue;
 
 				if ("M".equals(d[0])) {
 					Date matchStart = f.parse(d[2]);
 					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4]);
 					m.pingMS = Integer.parseInt(d[5]);
-					if (d.length > 6)
-						m.winStreak = Integer.parseInt(d[6]);
+					m.winStreak = Integer.parseInt(d[6]);
 					addMatch(m);
 					continue;
 				}
@@ -1130,6 +1131,9 @@ class Core {
 			for (Round r : rounds) {
 				if (!r.isFallBall())
 					continue;
+				Player p = r.getMe();
+				if (p == null)
+					continue;
 				if (currentMatch == null || !currentMatch.equals(r.match)) {
 					currentMatch = r.match;
 					// write match line
@@ -1148,9 +1152,6 @@ class Core {
 					out.print(currentMatch.winStreak); // 6
 					out.println();
 				}
-				Player p = r.getMe();
-				if (p == null)
-					continue;
 				out.print("r"); // 0
 				out.print("\t");
 				out.print(f.format(r.start)); // 1
@@ -1194,13 +1195,15 @@ class Core {
 		synchronized (listLock) {
 			int i = matches.indexOf(m);
 			if (i >= 0) {
-				matches.remove(m);
+				Match prev = matches.remove(i);
+				m.rounds = prev.rounds;
 				matches.add(i, m);
 			} else
 				matches.add(m);
 			// 直前のマッチのラウンド０だったら除去
 			if (matches.size() > 2 && matches.get(matches.size() - 2).rounds.size() == 0)
 				matches.remove(matches.size() - 2);
+			currentMatch = m;
 		}
 	}
 
@@ -1208,24 +1211,15 @@ class Core {
 		synchronized (listLock) {
 			int i = rounds.indexOf(r);
 			if (i >= 0) {
-				rounds.remove(r);
+				Round prev = rounds.remove(i);
+				r.byId = prev.byId;
+				r.byName = prev.byName;
 				rounds.add(i, r);
 			} else
 				rounds.add(r);
-			getCurrentMatch().addRound(r);
+			currentRound = r;
+			currentMatch.addRound(r);
 		}
-	}
-
-	public static Match getCurrentMatch() {
-		if (matches.size() == 0)
-			return null;
-		return matches.get(matches.size() - 1);
-	}
-
-	public static Round getCurrentRound() {
-		if (rounds.size() == 0)
-			return null;
-		return rounds.get(rounds.size() - 1);
 	}
 
 	// 新しい順にする
@@ -1425,7 +1419,7 @@ class FGReader extends TailerListenerAdapter {
 	}
 
 	private void parseLine(String line) {
-		Round r = Core.getCurrentRound();
+		Round r = Core.currentRound;
 		Matcher m = patternLaunch.matcher(line);
 		if (m.find()) {
 			Core.currentSession = getTime(line).getTime();
@@ -1489,7 +1483,7 @@ class FGReader extends TailerListenerAdapter {
 			m = patternShowName.matcher(line);
 			if (m.find()) {
 				String showName = m.group(1);
-				Core.getCurrentMatch().name = showName;
+				Core.currentMatch.name = showName;
 				listener.showUpdated();
 				return;
 			}
@@ -1501,9 +1495,9 @@ class FGReader extends TailerListenerAdapter {
 			if (m.find()) {
 				String roundName = m.group(1);
 				//long frame = Long.parseUnsignedLong(m.group(2)); // FIXME: round id のほうが適切
-				Core.addRound(new Round(roundName, Core.getCurrentMatch().rounds.size(), getTime(line), isFinal,
-						Core.getCurrentMatch()));
-				r = Core.getCurrentRound();
+				Core.addRound(new Round(roundName, Core.currentMatch.rounds.size(), getTime(line), isFinal,
+						Core.currentMatch));
+				r = Core.currentRound;
 				System.out.println("DETECT STARTING " + roundName);
 				//readState = ReadState.MEMBER_DETECTING;
 				return;
@@ -1593,7 +1587,7 @@ class FGReader extends TailerListenerAdapter {
 				// start を書き換える前のエントリを除去
 				synchronized (Core.listLock) {
 					Core.rounds.remove(r);
-					Core.getCurrentMatch().rounds.remove(r);
+					Core.currentMatch.rounds.remove(r);
 				}
 				r.start = getTime(line);
 				Core.addRound(r); // 再add
@@ -1606,7 +1600,7 @@ class FGReader extends TailerListenerAdapter {
 					survivalScoreTimer.scheduleAtFixedRate(new TimerTask() {
 						@Override
 						public void run() {
-							for (Player p : Core.getCurrentRound().byId.values()) {
+							for (Player p : Core.currentRound.byId.values()) {
 								if (p.qualified == null)
 									p.score += 1;
 							}
@@ -1726,8 +1720,7 @@ class FGReader extends TailerListenerAdapter {
 			}
 			// round end
 			//if (text.contains("[ClientGameManager] Server notifying that the round is over.")
-			if (line.contains(
-					"[GameSession] Changing state from Playing to GameOver")) {
+			if (line.contains("[GameSession] Changing state from Playing to GameOver")) {
 				r.end = getTime(line);
 				if (survivalScoreTimer != null) {
 					survivalScoreTimer.cancel();
@@ -1754,14 +1747,14 @@ class FGReader extends TailerListenerAdapter {
 				}
 				// fallball 専用処理
 				r.playerCountAdd = r.playerCount < 20 ? -r.playerCount % 2 : 0; // デフォルトで20以下奇数時は -1 補正する。
-				Core.getCurrentMatch().end = getTime(line);
+				Core.currentMatch.end = getTime(line);
 				// 優勝画面に行ったらそのラウンドをファイナル扱いとする
 				// final マークがつかないファイナルや、通常ステージで一人生き残り優勝のケースを補填するためだが
 				// 通常ステージでゲーム終了時それをファイナルステージとみなすべきかはスコアリング上微妙ではある。
 				if (line.contains(
 						"[GameStateMachine] Replacing FGClient.StateGameInProgress with FGClient.StateVictoryScreen")) {
 					r.isFinal = true;
-					Core.getCurrentMatch().finished(getTime(line));
+					Core.currentMatch.finished(getTime(line));
 				}
 				Core.updateStats();
 				listener.roundDone();
@@ -1785,7 +1778,7 @@ class FGReader extends TailerListenerAdapter {
 					survivalScoreTimer = null;
 				}
 				readState = ReadState.SHOW_DETECTING;
-				Core.getCurrentMatch().finished(getTime(line));
+				Core.currentMatch.finished(getTime(line));
 				return;
 			}
 			return;
@@ -2084,6 +2077,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		DefaultListModel<Round> model = (DefaultListModel<Round>) roundsSel.getModel();
 		model.clear();
 		synchronized (Core.listLock) {
+			//for (Round r : Core.rounds) {
 			for (Round r : Core.filtered) {
 				if (r.isFallBall() && r.getMe() != null) {
 					model.addElement(r);
@@ -2131,6 +2125,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	@Override
 	public void roundStarted() {
 		SwingUtilities.invokeLater(() -> {
+			Core.updateStats();
 			updateRounds();
 		});
 	}
@@ -2234,7 +2229,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	void displayFooter() {
 		String text = "";
-		Match m = Core.getCurrentMatch();
+		Match m = Core.currentMatch;
 		if (m == null)
 			return;
 		if (m.start != null) {
