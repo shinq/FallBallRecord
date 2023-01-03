@@ -129,7 +129,7 @@ class Player {
 	}
 }
 
-class Round {
+class Round implements Comparable<Round> {
 	final Match match;
 	final String name;
 	boolean isFinal;
@@ -314,6 +314,11 @@ class Round {
 			return true;
 		Round o = (Round) obj;
 		return start.equals(o.start);
+	}
+
+	@Override
+	public int compareTo(Round o) {
+		return start.compareTo(o.start);
 	}
 
 	public String toOverviewString() {
@@ -1027,7 +1032,7 @@ class Core {
 	public static final List<Achievement> achievements = new ArrayList<>();
 	public static final List<Challenge> dailyChallenges = new ArrayList<>();
 
-	static final SimpleDateFormat datef = new SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.JAPAN);
+	static final SimpleDateFormat datef = new SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN);
 	static final DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
 	static {
 		f.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -1101,9 +1106,8 @@ class Core {
 				r.fixed = true;
 
 				r.qualifiedCount = Integer.parseInt(d[7]);
-				if (d[8].length() > 0) {
+				if (d[8].length() > 0)
 					r.myFinish = r.end = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
-				}
 				Player p = new Player(0);
 				p.name = "YOU";
 				p.qualified = "true".equals(d[9]);
@@ -1128,6 +1132,7 @@ class Core {
 			out.println(
 					"Type\tStart\tNo\tName\tName2\tFinal\tPlayers\tQualifiedCount\tTime\tQualified\tDisabled\tplayerCoundAdd\tTeam\tTeamScore");
 			Match currentMatch = null;
+			Collections.sort(rounds);
 			for (Round r : rounds) {
 				if (!r.isFallBall())
 					continue;
@@ -1193,10 +1198,10 @@ class Core {
 
 	public static void addMatch(Match m) {
 		synchronized (listLock) {
+			// 既にあれば差し替え
 			int i = matches.indexOf(m);
 			if (i >= 0) {
-				Match prev = matches.remove(i);
-				m.rounds = prev.rounds;
+				matches.remove(i);
 				matches.add(i, m);
 			} else
 				matches.add(m);
@@ -1211,9 +1216,7 @@ class Core {
 		synchronized (listLock) {
 			int i = rounds.indexOf(r);
 			if (i >= 0) {
-				Round prev = rounds.remove(i);
-				r.byId = prev.byId;
-				r.byName = prev.byName;
+				rounds.remove(i);
 				rounds.add(i, r);
 			} else
 				rounds.add(r);
@@ -1279,9 +1282,10 @@ class Core {
 	public static List<Challenge> getChallenges(int dayKey) {
 		Random random = new Random(dayKey);
 
-		List<Challenge> result = new ArrayList<>();
-		for (int i = 0; i < 3; i += 1)
-			result.add(dailyChallenges.get(random.nextInt(dailyChallenges.size())));
+		List<Challenge> result = new ArrayList<>(dailyChallenges);
+		Collections.shuffle(result, random);
+		while (result.size() > 3)
+			result.remove(result.size() - 1);
 		return result;
 	}
 
@@ -2066,7 +2070,20 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		// start log read
 		reader = new FGReader(
 				new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player.log"), this);
+		readLog(new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player-prev.log"));
 		reader.start();
+	}
+
+	void readLog(File log) {
+		try (BufferedReader in = new BufferedReader(
+				new InputStreamReader(new FileInputStream(log), StandardCharsets.UTF_8))) {
+			String line;
+			while ((line = in.readLine()) != null) {
+				reader.handle(line);
+			}
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		}
 	}
 
 	void updateMatches() {
@@ -2112,6 +2129,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	*/
 
 	void roundSelected(Round r) {
+		if (r == null)
+			return;
 		refreshRoundDetail(r);
 	}
 
@@ -2183,9 +2202,9 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		System.out.println(r.topFinish);
 		System.out.println(r.myFinish);
 		System.out.println(r.end);
-		System.out.println(r.fixed);
-		System.out.println(r.qualifiedCount);
-		System.out.println(r.playerCount);
+		System.out.println("FIXED:" + r.fixed);
+		System.out.println("players:" + r.playerCount);
+		System.out.println("qualified:" + r.qualifiedCount);
 		System.out.println(Arrays.toString(r.teamScore));
 		synchronized (Core.listLock) {
 			for (Player p : r.byRank()) {
