@@ -84,29 +84,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 class PlayerStat {
 	int participationCount; // rate 分母(今回log分)。
 	int winCount; // rate 分子(今回log分)。
-	int winStreak;
 	int totalParticipationCount; // rate 分母。
 	int totalWinCount; // rate 分子。
-	int totalPoint;
+	int totalAchievementPoint;
+	int totalDailyPoint;
 
 	public double getRate() {
 		return Core.calRate(winCount, participationCount);
 	}
 
-	public boolean setWin(Round r, boolean win, int score) {
-		if (win) {
-			if (r.match.isCurrentSession())
-				winCount += 1;
-			totalWinCount += 1;
-			winStreak += 1;
-		} else {
-			winStreak = 0;
-		}
-		return win;
-	}
-
 	public void reset() {
-		totalParticipationCount = totalWinCount = participationCount = winCount = winStreak = 0;
+		totalParticipationCount = totalWinCount = participationCount = winCount = 0;
 	}
 }
 
@@ -364,20 +352,47 @@ class Round {
 
 // 一つのショー
 class Match {
-	long session; // 起動日時ベース
-	boolean fixed; // 完了まで読み込み済み
+	final long session; // 起動日時ベース
 	String name;
-	String ip;
-	long pingMS;
 	final Date start; // id として使用
+	final String ip;
+	long pingMS;
+	boolean fixed; // 完了まで読み込み済み
 	Date end;
 	int winStreak;
 	List<Round> rounds = new ArrayList<Round>();
 
-	public Match(String name, Date start, String ip) {
+	public Match(long session, String name, Date start, String ip) {
+		this.session = session;
 		this.name = name;
 		this.start = start;
 		this.ip = ip;
+	}
+
+	public void addRound(Round r) {
+		synchronized (Core.listLock) {
+			int i = rounds.indexOf(r);
+			if (i >= 0) {
+				rounds.remove(r);
+				rounds.add(i, r);
+			} else
+				rounds.add(r);
+		}
+		Core.filter(Core.filter, Core.limit, true);
+	}
+
+	public void finished(Date end) {
+		this.end = end;
+
+		// 優勝なら match に勝利数書き込み
+		Round last = rounds.get(rounds.size() - 1);
+		Player p = last.getMe();
+		if (p != null && p.isQualified() && last.isFinal()) {
+			winStreak = 1;
+			List<Match> matches = Core.matches;
+			if (matches.size() > 1)
+				Core.getCurrentMatch().winStreak += Core.matches.get(Core.matches.size() - 2).winStreak;
+		}
 	}
 
 	public boolean isCurrentSession() {
@@ -706,6 +721,7 @@ class GraphPanel extends JPanel {
 
 abstract class Achievement {
 	int currentValue;
+	int myPoint;
 	int[] threasholds;
 	int[] points;
 	JPanel panel = new JPanel(new BorderLayout());
@@ -721,6 +737,10 @@ abstract class Achievement {
 
 	public void update() {
 		calcCurrentValue();
+		myPoint = 0;
+		for (int i = 0; i < threasholds.length; i += 1)
+			if (currentValue >= threasholds[i])
+				myPoint += points[i];
 		int max = threasholds[threasholds.length - 1];
 		//if (currentValue > max) currentValue = max;
 		progressGraph.currentValue = currentValue < max ? currentValue : max;
@@ -729,6 +749,16 @@ abstract class Achievement {
 		label.setText(toString());
 		progressLabel.setText(
 				currentValue + "/" + max + " (" + Core.calRate(currentValue < max ? currentValue : max, max) + "%)");
+		StringBuilder buf = new StringBuilder();
+		buf.append("<html>");
+		for (int i = 0; i < threasholds.length; i += 1) {
+			if (currentValue >= threasholds[i])
+				buf.append(threasholds[i] + "/" + threasholds[i] + " = " + points[i] + "pt GET!<br>");
+			else
+				buf.append(currentValue + "/" + threasholds[i] + " = " + points[i] + "pt<br>");
+		}
+		buf.append("</html>");
+		panel.setToolTipText(new String(buf));
 	}
 
 	public abstract void calcCurrentValue();
@@ -766,7 +796,7 @@ class WinCountAchievement extends Achievement {
 	public void calcCurrentValue() {
 		currentValue = Core
 				.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isQualified()
-						&& (!overtimeOnly || r.getTime(r.myFinish) > 121000))
+						&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000)))
 				.size();
 	}
 
@@ -857,6 +887,18 @@ class AllRoundFilter implements RoundFilter {
 	@Override
 	public String toString() {
 		return "ALL";
+	}
+}
+
+class CurrentSessionRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		return r.isFallBall() && r.getMe() != null && r.match.isCurrentSession();
+	}
+
+	@Override
+	public String toString() {
+		return "CurrentSesionOnly";
 	}
 }
 
@@ -971,7 +1013,7 @@ class Core {
 	*/
 
 	//////////////////////////////////////////////////////////////
-	public static RoundFilter filter = new AllRoundFilter();
+	public static RoundFilter filter = new CurrentSessionRoundFilter();
 	public static int limit = 0;
 	public static long currentSession;
 	public static String currentServerIp;
@@ -1044,9 +1086,10 @@ class Core {
 
 				if ("M".equals(d[0])) {
 					Date matchStart = f.parse(d[2]);
-					m = new Match(d[3], matchStart, d[4]);
-					m.session = Long.parseLong(d[1]);
+					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4]);
 					m.pingMS = Integer.parseInt(d[5]);
+					if (d.length > 6)
+						m.winStreak = Integer.parseInt(d[6]);
 					addMatch(m);
 					continue;
 				}
@@ -1057,8 +1100,9 @@ class Core {
 				r.fixed = true;
 
 				r.qualifiedCount = Integer.parseInt(d[7]);
-				if (d[8].length() > 0)
-					r.myFinish = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
+				if (d[8].length() > 0) {
+					r.myFinish = r.end = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
+				}
 				Player p = new Player(0);
 				p.name = "YOU";
 				p.qualified = "true".equals(d[9]);
@@ -1068,7 +1112,7 @@ class Core {
 				if (d.length > 13)
 					r.teamScore = Core.intArrayFromString(d[13]);
 				r.add(p);
-				rounds.add(r);
+				addRound(r);
 				r.playerCount = Integer.parseInt(d[6]);
 			}
 		} catch (Exception ex) {
@@ -1081,7 +1125,7 @@ class Core {
 				new OutputStreamWriter(new FileOutputStream("stats.tsv"), StandardCharsets.UTF_8),
 				false)) {
 			out.println(
-					"type\tstart\tname\tplayers\tqualifiedCount\ttime\tqualified\tdisabled\tplayerCoundAdd\tteam\tteamScore");
+					"Type\tStart\tNo\tName\tName2\tFinal\tPlayers\tQualifiedCount\tTime\tQualified\tDisabled\tplayerCoundAdd\tTeam\tTeamScore");
 			Match currentMatch = null;
 			for (Round r : rounds) {
 				if (!r.isFallBall())
@@ -1100,6 +1144,8 @@ class Core {
 					out.print(currentMatch.ip); // 4
 					out.print("\t");
 					out.print(currentMatch.pingMS); // 5
+					out.print("\t");
+					out.print(currentMatch.winStreak); // 6
 					out.println();
 				}
 				Player p = r.getMe();
@@ -1146,21 +1192,27 @@ class Core {
 
 	public static void addMatch(Match m) {
 		synchronized (listLock) {
-			if (matches.contains(m))
+			int i = matches.indexOf(m);
+			if (i >= 0) {
 				matches.remove(m);
+				matches.add(i, m);
+			} else
+				matches.add(m);
 			// 直前のマッチのラウンド０だったら除去
-			if (matches.size() > 1 && getCurrentMatch().rounds.size() == 0)
-				matches.remove(matches.size() - 1);
-			matches.add(m);
+			if (matches.size() > 2 && matches.get(matches.size() - 2).rounds.size() == 0)
+				matches.remove(matches.size() - 2);
 		}
 	}
 
 	public static void addRound(Round r) {
 		synchronized (listLock) {
-			if (rounds.contains(r))
+			int i = rounds.indexOf(r);
+			if (i >= 0) {
 				rounds.remove(r);
-			rounds.add(r);
-			getCurrentMatch().rounds.add(r);
+				rounds.add(i, r);
+			} else
+				rounds.add(r);
+			getCurrentMatch().addRound(r);
 		}
 	}
 
@@ -1211,18 +1263,22 @@ class Core {
 				for (Player p : r.byId.values()) {
 					if (!"YOU".equals(p.name))
 						continue;
-					if (r.match.isCurrentSession())
+					if (r.match.isCurrentSession()) {
 						stat.participationCount += 1; // 参加 round 数
+						stat.winCount += p.isQualified() ? 1 : 0;
+					}
 					stat.totalParticipationCount += 1; // 参加 round 数
-					stat.setWin(r, p.isQualified(), 1);
+					stat.totalWinCount += p.isQualified() ? 1 : 0;
 				}
 			}
 		}
 	}
 
 	public static void updateAchivements() {
+		stat.totalAchievementPoint = 0;
 		for (Achievement a : achievements) {
 			a.update();
+			stat.totalAchievementPoint += a.myPoint;
 		}
 	}
 
@@ -1373,6 +1429,7 @@ class FGReader extends TailerListenerAdapter {
 		Matcher m = patternLaunch.matcher(line);
 		if (m.find()) {
 			Core.currentSession = getTime(line).getTime();
+			return;
 		}
 		/*
 		if (line.contains("[UserInfo] Player Name:")) {
@@ -1384,7 +1441,7 @@ class FGReader extends TailerListenerAdapter {
 		if (m.find()) {
 			String showName = "_";
 			String ip = m.group(1);
-			Match match = new Match(showName, getTime(line), ip);
+			Match match = new Match(Core.currentSession, showName, getTime(line), ip);
 			Core.addMatch(match);
 			System.out.println("DETECT SHOW STARTING");
 			readState = ReadState.ROUND_DETECTING;
@@ -1420,6 +1477,7 @@ class FGReader extends TailerListenerAdapter {
 				}
 			}
 			listener.showUpdated();
+			return;
 		}
 		m = patternLocalPlayerId.matcher(line);
 		if (m.find()) {
@@ -1433,11 +1491,11 @@ class FGReader extends TailerListenerAdapter {
 				String showName = m.group(1);
 				Core.getCurrentMatch().name = showName;
 				listener.showUpdated();
-				break;
+				return;
 			}
 			if (line.contains("isFinalRound=")) {
 				isFinal = line.contains("isFinalRound=True");
-				break;
+				return;
 			}
 			m = patternRoundName.matcher(line);
 			if (m.find()) {
@@ -1448,6 +1506,7 @@ class FGReader extends TailerListenerAdapter {
 				r = Core.getCurrentRound();
 				System.out.println("DETECT STARTING " + roundName);
 				//readState = ReadState.MEMBER_DETECTING;
+				return;
 			}
 			m = patternLoadedRound.matcher(line);
 			if (m.find()) {
@@ -1455,8 +1514,9 @@ class FGReader extends TailerListenerAdapter {
 				r.roundName2 = roundName2;
 				System.out.println("DETECT STARTING " + roundName2);
 				readState = ReadState.MEMBER_DETECTING;
+				return;
 			}
-			break;
+			return;
 		case MEMBER_DETECTING: // join detection
 			// 本来 playerId, name が先に検出されるべきだが、playerId, objectId が先に出力されうるためどちらが先でも対応できるようにする。
 			m = patternPlayerObjectId.matcher(line);
@@ -1470,7 +1530,7 @@ class FGReader extends TailerListenerAdapter {
 				}
 				p.objectId = playerObjectId;
 				// System.out.println("playerId=" + playerId + " objectId=" + playerObjectId);
-				break;
+				return;
 			}
 			m = patternPlayerSpawn.matcher(line);
 			if (m.find()) {
@@ -1504,7 +1564,7 @@ class FGReader extends TailerListenerAdapter {
 				// if (Core.myName.equals(p.name))
 				if (r.myPlayerId == p.id)
 					myObjectId = p.objectId;
-				break;
+				return;
 			}
 			// こちらで取れる名前は旧名称だった…
 			/* この行での名前出力がなくなっていた
@@ -1522,14 +1582,21 @@ class FGReader extends TailerListenerAdapter {
 						Core.myName = p.name;
 				}
 				r.add(p);
-				break;
+				return;
 			}
 			*/
 			if (line.contains("[StateGameLoading] Starting the game.")) {
 				listener.roundStarted();
+				return;
 			}
 			if (line.contains("[GameSession] Changing state from Countdown to Playing")) {
+				// start を書き換える前のエントリを除去
+				synchronized (Core.listLock) {
+					Core.rounds.remove(r);
+					Core.getCurrentMatch().rounds.remove(r);
+				}
 				r.start = getTime(line);
+				Core.addRound(r); // 再add
 				topObjectId = 0;
 				listener.roundStarted();
 				qualifiedCount = eliminatedCount = 0; // reset
@@ -1547,16 +1614,16 @@ class FGReader extends TailerListenerAdapter {
 						}
 					}, 1000, 1000);
 				}
-				break;
+				return;
 			}
 			if (line.contains("[StateMainMenu] Creating or joining lobby")
 					|| line.contains("[StateMatchmaking] Begin matchmaking")) {
 				System.out.println("DETECT BACK TO LOBBY");
 				Core.rounds.remove(Core.rounds.size() - 1); // delete current round
 				readState = ReadState.SHOW_DETECTING;
-				break;
+				return;
 			}
-			break;
+			return;
 		case RESULT_DETECTING: // result detection
 			// score update duaring round
 			m = patternScoreUpdated.matcher(line);
@@ -1571,17 +1638,20 @@ class FGReader extends TailerListenerAdapter {
 						listener.roundUpdated();
 					}
 				}
-				break;
+				return;
 			}
 			m = patternTeamScoreUpdated.matcher(line);
 			if (m.find()) {
+				int teamCount = r.getDef().teamCount;
+				if (teamCount < 2)
+					return;
 				int teamId = Integer.parseUnsignedInt(m.group(1));
 				int score = Integer.parseUnsignedInt(m.group(2));
 				if (r.teamScore == null)
-					r.teamScore = new int[r.getDef().teamCount];
+					r.teamScore = new int[teamCount];
 				r.teamScore[teamId] = score;
 				listener.roundUpdated();
-				break;
+				return;
 			}
 			// finish time handling
 			if (line.contains("[ClientGameManager] Handling unspawn for player FallGuy ")) {
@@ -1593,6 +1663,7 @@ class FGReader extends TailerListenerAdapter {
 				if (line.contains("[ClientGameManager] Handling unspawn for player FallGuy [" + myObjectId + "] ")) {
 					r.myFinish = getTime(line);
 				}
+				return;
 			}
 
 			// qualified / eliminated
@@ -1623,16 +1694,6 @@ class FGReader extends TailerListenerAdapter {
 						r.qualifiedCount += 1;
 						player.ranking = qualifiedCount;
 						System.out.println("Qualified " + player + " rank=" + player.ranking + " " + player.score);
-
-						// 優勝なら match に勝利数書き込み(squads win 未対応)
-						// if (Core.myName.equals(player.name) && r.isFinal()) {
-						if (r.myPlayerId == player.id && r.isFinal()) {
-							Core.getCurrentMatch().winStreak = 1;
-							List<Match> matches = Core.matches;
-							if (matches.size() > 1)
-								Core.getCurrentMatch().winStreak += matches.get(matches.size() - 2).winStreak;
-						}
-
 					} else {
 						if (topObjectId == player.objectId) {
 							topObjectId = 0; // 切断でも Handling unspawn が出るのでこれを無視して先頭ゴールのみ検出するため
@@ -1644,7 +1705,7 @@ class FGReader extends TailerListenerAdapter {
 					}
 					listener.roundUpdated();
 				}
-				break;
+				return;
 			}
 			// score log
 			// round over より後に出力されている。
@@ -1661,7 +1722,7 @@ class FGReader extends TailerListenerAdapter {
 						player.finalScore = finalScore;
 					}
 				}
-				break;
+				return;
 			}
 			// round end
 			//if (text.contains("[ClientGameManager] Server notifying that the round is over.")
@@ -1673,6 +1734,7 @@ class FGReader extends TailerListenerAdapter {
 					survivalScoreTimer.purge();
 					survivalScoreTimer = null;
 				}
+				return;
 			}
 			if (line.contains(
 					"[GameStateMachine] Replacing FGClient.StateGameInProgress with FGClient.StateQualificationScreen")
@@ -1697,17 +1759,18 @@ class FGReader extends TailerListenerAdapter {
 				// final マークがつかないファイナルや、通常ステージで一人生き残り優勝のケースを補填するためだが
 				// 通常ステージでゲーム終了時それをファイナルステージとみなすべきかはスコアリング上微妙ではある。
 				if (line.contains(
-						"[GameStateMachine] Replacing FGClient.StateGameInProgress with FGClient.StateVictoryScreen"))
+						"[GameStateMachine] Replacing FGClient.StateGameInProgress with FGClient.StateVictoryScreen")) {
 					r.isFinal = true;
+					Core.getCurrentMatch().finished(getTime(line));
+				}
 				Core.updateStats();
 				listener.roundDone();
 				readState = ReadState.ROUND_DETECTING;
-				break;
+				return;
 			}
 			if (line.contains("== [CompletedEpisodeDto] ==")) {
 				// 獲得 kudos 他はこの後に続く、決勝完了前に吐くこともあるのでステージ完了ではない。
-
-				break;
+				return;
 			}
 			if (line.contains(
 					"[GameStateMachine] Replacing FGClient.StatePrivateLobby with FGClient.StateMainMenu")
@@ -1722,10 +1785,10 @@ class FGReader extends TailerListenerAdapter {
 					survivalScoreTimer = null;
 				}
 				readState = ReadState.SHOW_DETECTING;
-				Core.getCurrentMatch().end = getTime(line);
-				break;
+				Core.getCurrentMatch().finished(getTime(line));
+				return;
 			}
-			break;
+			return;
 		}
 	}
 }
@@ -1789,8 +1852,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	}
 
 	JLabel pingLabel;
-	JList<Round> roundsSel;
 	JTextPane statsArea;
+	JList<Round> roundsSel;
 	JComboBox<RoundFilter> filterSel;
 	JComboBox<Integer> limitSel;
 	boolean ignoreSelEvent;
@@ -1882,6 +1945,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.WEST, filterSel, COL1_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, filterSel, -90, SpringLayout.SOUTH, p);
 		filterSel.setSize(95, 20);
+		filterSel.addItem(new CurrentSessionRoundFilter());
 		filterSel.addItem(new AllRoundFilter());
 		filterSel.addItem(new CustomRoundFilter());
 		filterSel.addItem(new NotCustomRoundFilter());
@@ -2151,12 +2215,17 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
 		//appendToStats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
 
-		appendToStats("Today's challanges", "bold");
+		appendToStats("Today's challenges", "bold");
 		int dayKey = Core.toDateKey(new Date());
+		stat.totalDailyPoint = 0;
 		for (Challenge c : Core.getChallenges(dayKey)) {
 			boolean complete = c.isComplete(dayKey);
+			if (complete)
+				stat.totalDailyPoint += c.point();
 			appendToStats((complete ? "○" : "  ") + c.toString(), complete ? "bold" : null);
 		}
+
+		appendToStats("Total Points: " + (stat.totalAchievementPoint + stat.totalDailyPoint), "bold");
 
 		statsArea.setCaretPosition(0);
 	}
