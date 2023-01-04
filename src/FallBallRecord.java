@@ -65,6 +65,7 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextPane;
 import javax.swing.SpringLayout;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.text.BadLocationException;
@@ -88,6 +89,7 @@ class PlayerStat {
 	int totalWinCount; // rate 分子。
 	int totalAchievementPoint;
 	int totalDailyPoint;
+	int todayDailyPoint;
 
 	public double getRate() {
 		return Core.calRate(winCount, participationCount);
@@ -205,7 +207,7 @@ class Round implements Comparable<Round> {
 	}
 
 	public boolean isDate(int dayKey) {
-		return dayKey == Core.toDateKey(start);
+		return dayKey == Core.toDayKey(start);
 	}
 
 	public boolean isFallBall() {
@@ -342,6 +344,7 @@ class Round implements Comparable<Round> {
 					.append(getTeamScore(1 - p.teamId));
 		if (myFinish != null)
 			buf.append(" ").append((double) getTime(myFinish) / 1000).append("s");
+		buf.append(" ").append(match.ip);
 		buf.append(" ").append(match.pingMS).append("ms");
 		if (p.disabled)
 			buf.append(" ☓");
@@ -580,121 +583,8 @@ class RoundDef {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
-// Core.rounds をもとに日毎のチャレンジ達成判定
-abstract class Challenge {
-	// yyyyMMdd の８桁数値
-	public abstract boolean isComplete(int dayKey);
-
-	public int point() {
-		return 1;
-	}
-
-	public abstract String getName();
-
-	@Override
-	public String toString() {
-		return getName() + "(" + point() + ")";
-	}
-}
-
-class RoundCountChallenge extends Challenge {
-	int count;
-
-	public RoundCountChallenge(int count) {
-		this.count = count;
-	}
-
-	@Override
-	public boolean isComplete(int dayKey) {
-		return Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isDate(dayKey)).size() >= count;
-	}
-
-	public int point() {
-		return count > 10 ? 2 : 1;
-	}
-
-	@Override
-	public String getName() {
-		return count + " round played";
-	}
-}
-
-class WinCountChallenge extends Challenge {
-	int count;
-	boolean overtimeOnly;
-	int playerCount;
-	int thresholdScoreDiff;
-
-	public WinCountChallenge(int count, boolean overtimeOnly, int playerCount, int scoreDiff) {
-		this.count = count;
-		this.overtimeOnly = overtimeOnly;
-		this.playerCount = playerCount;
-		this.thresholdScoreDiff = scoreDiff;
-	}
-
-	@Override
-	public boolean isComplete(int dayKey) {
-		return Core.filter(r -> {
-			if (playerCount > 0 && r.getSubstanceQualifiedCount() != playerCount)
-				return false;
-			if (r.teamScore != null) {
-				int scoreDiff = Math.abs(r.teamScore[0] - r.teamScore[1]);
-				if (thresholdScoreDiff == 1 && scoreDiff != 1)
-					return false;
-				if (thresholdScoreDiff > 1 && scoreDiff < thresholdScoreDiff)
-					return false;
-			}
-			return r.isFallBall() && r.isCustomFallBall() && r.isQualified()
-					&& (!overtimeOnly || r.getTime(r.myFinish) > 121000) && r.isDate(dayKey);
-		}).size() > count;
-	}
-
-	public int point() {
-		return count >= 10 ? 2 : thresholdScoreDiff > 2 ? 2 : 1;
-	}
-
-	@Override
-	public String getName() {
-		return count + " wins" + (overtimeOnly ? " at overtime round" : "")
-				+ (playerCount > 0 ? " on " + playerCount + "vs" + playerCount : "")
-				+ (thresholdScoreDiff > 0 ? " over " + thresholdScoreDiff + " scores" : "");
-	}
-}
-
-class StreakChallenge extends Challenge {
-	int targetStreak;
-
-	public StreakChallenge(int streak) {
-		this.targetStreak = streak;
-	}
-
-	@Override
-	public boolean isComplete(int dayKey) {
-		int streak = 0;
-		for (Round r : Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isDate(dayKey))) {
-			if (r.isQualified()) {
-				streak += 1;
-				if (targetStreak == streak)
-					return true;
-			} else
-				streak = 0;
-		}
-		return false;
-	}
-
-	public int point() {
-		return targetStreak >= 3 ? 2 : 1;
-	}
-
-	@Override
-	public String getName() {
-		return targetStreak + " wins streak";
-	}
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
 // Core.rounds をもとに実績達成判定
-// 一つの実績に複数の達成地と付与ポイントを保持可能とする。
+// 一つの実績に複数の達成状態と付与ポイントを保持可能とする。
 class GraphPanel extends JPanel {
 	int currentValue;
 	int[] threasholds;
@@ -740,8 +630,8 @@ abstract class Achievement {
 		panel.add(progressLabel, BorderLayout.EAST);
 	}
 
-	public void update() {
-		calcCurrentValue();
+	public void update(int dayKey) {
+		calcCurrentValue(dayKey);
 		myPoint = 0;
 		for (int i = 0; i < threasholds.length; i += 1)
 			if (currentValue >= threasholds[i])
@@ -766,9 +656,14 @@ abstract class Achievement {
 		panel.setToolTipText(new String(buf));
 	}
 
-	public abstract void calcCurrentValue();
+	public abstract void calcCurrentValue(int dayKey);
 
-	public abstract String toString();
+	public abstract String getName();
+
+	@Override
+	public String toString() {
+		return getName() + "(" + points[points.length - 1] + ")";
+	}
 }
 
 class RoundCountAchievement extends Achievement {
@@ -778,36 +673,57 @@ class RoundCountAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue() {
-		currentValue = Core.filter(r -> r.isFallBall() && r.isCustomFallBall()).size();
+	public void calcCurrentValue(int dayKey) {
+		currentValue = Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && (dayKey == 0 || r.isDate(dayKey)))
+				.size();
 	}
 
 	@Override
-	public String toString() {
+	public String getName() {
 		return "Custom Rounds played";
 	}
 }
 
 class WinCountAchievement extends Achievement {
 	boolean overtimeOnly;
+	int playerCount;
+	int thresholdScoreDiff;
 
-	public WinCountAchievement(int[] threasholds, int[] points, boolean overtimeOnly) {
+	public WinCountAchievement(int[] threasholds, int[] points, boolean overtimeOnly, int playerCount, int scoreDiff) {
 		this.threasholds = threasholds;
 		this.points = points;
 		this.overtimeOnly = overtimeOnly;
+		this.playerCount = playerCount;
+		this.thresholdScoreDiff = scoreDiff;
 	}
 
 	@Override
-	public void calcCurrentValue() {
+	public void calcCurrentValue(int dayKey) {
 		currentValue = Core
-				.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isQualified()
-						&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000)))
+				.filter(r -> {
+					if (playerCount > 8 && r.getSubstanceQualifiedCount() < playerCount)
+						return false;
+					if (playerCount > 0 && playerCount < 9 && r.getSubstanceQualifiedCount() != playerCount)
+						return false;
+					if (r.teamScore != null) {
+						int scoreDiff = Math.abs(r.teamScore[0] - r.teamScore[1]);
+						if (thresholdScoreDiff == 1 && scoreDiff != 1)
+							return false;
+						if (thresholdScoreDiff > 1 && scoreDiff < thresholdScoreDiff)
+							return false;
+					}
+					return r.isFallBall() && r.isCustomFallBall() && r.isQualified()
+							&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000))
+							&& (dayKey == 0 || r.isDate(dayKey));
+				})
 				.size();
 	}
 
 	@Override
-	public String toString() {
-		return "Wins" + (overtimeOnly ? " at overtime round" : "");
+	public String getName() {
+		return "Wins" + (overtimeOnly ? " at overtime round" : "")
+				+ (playerCount > 0 ? " on " + playerCount + "vs" + playerCount : "")
+				+ (thresholdScoreDiff > 0 ? " over " + thresholdScoreDiff + " scores" : "");
 	}
 }
 
@@ -821,10 +737,11 @@ class StreakAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue() {
+	public void calcCurrentValue(int dayKey) {
 		currentValue = 0;
 		int streak = 0;
-		for (Round r : Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled())) {
+		for (Round r : Core.filter(
+				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey)))) {
 			if (r.isQualified()) {
 				streak += 1;
 				if (targetStreak == streak)
@@ -835,7 +752,7 @@ class StreakAchievement extends Achievement {
 	}
 
 	@Override
-	public String toString() {
+	public String getName() {
 		return targetStreak + " wins streak";
 	}
 }
@@ -852,7 +769,7 @@ class RateAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue() {
+	public void calcCurrentValue(int dayKey) {
 		currentValue = 0;
 		int winCount = 0;
 		List<Round> filtered = Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled());
@@ -873,7 +790,7 @@ class RateAchievement extends Achievement {
 	}
 
 	@Override
-	public String toString() {
+	public String getName() {
 		return targetRate + "% wins in " + limit + " rounds";
 	}
 }
@@ -1001,7 +918,7 @@ class Core {
 		return result;
 	}
 
-	public static int toDateKey(Date date) {
+	public static int toDayKey(Date date) {
 		Calendar c = Calendar.getInstance();
 		c.setTime(date);
 		return c.get(Calendar.YEAR) * 10000 + c.get(Calendar.MONTH) * 100 + c.get(Calendar.DAY_OF_MONTH);
@@ -1030,54 +947,79 @@ class Core {
 	public static Map<String, Map<String, String>> servers = new HashMap<>();
 	public static final PlayerStat stat = new PlayerStat();
 	public static final List<Achievement> achievements = new ArrayList<>();
-	public static final List<Challenge> dailyChallenges = new ArrayList<>();
+	public static final List<Achievement> dailyChallenges = new ArrayList<>();
 
 	static final SimpleDateFormat datef = new SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN);
 	static final DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
 	static {
 		f.setTimeZone(TimeZone.getTimeZone("UTC"));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 10));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 10));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 50, 30));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 55, 30));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 3 }, 55, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 5 }, 60, 30));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 30));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 70, 30));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 75, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 20 }, 70, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 20 }, 75, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 5 }, 55, 50));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 60, 50));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 50));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 70, 50));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 75, 50));
-		achievements.add(new RoundCountAchievement(new int[] { 10, 20, 100, 500, 1000, 2000 },
-				new int[] { 1, 2, 10, 20, 30, 40 }));
-		achievements.add(new RoundCountAchievement(new int[] { 4000, 6000, 10000 },
-				new int[] { 100, 200, 300 }));
-		achievements.add(new WinCountAchievement(new int[] { 5, 10, 100, 300 },
-				new int[] { 1, 1, 10, 20, 30 }, false));
-		achievements.add(new WinCountAchievement(new int[] { 600, 1500, 3000 },
-				new int[] { 100, 200, 300 }, false));
-		achievements.add(new WinCountAchievement(new int[] { 2, 50, 150 },
-				new int[] { 1, 10, 20 }, true));
-		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
-				new int[] { 1, 1, 1 }, 3));
-		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
-				new int[] { 10, 20, 30 }, 5));
-		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
-				new int[] { 50, 100, 100 }, 7));
-		achievements.add(new StreakAchievement(new int[] { 1, 3, 5 },
-				new int[] { 100, 200, 300 }, 10));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 20 }, 65, 50));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 50 }, 70, 50));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 55, 100));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 20 }, 60, 100));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 50 }, 65, 100));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 100 }, 70, 100));
+		// rounds
+		achievements.add(new RoundCountAchievement(new int[] { 100, 500, 1000 },
+				new int[] { 1, 3, 3 }));
+		achievements.add(new RoundCountAchievement(new int[] { 5000, 10000, 20000, 50000, 100000 },
+				new int[] { 5, 10, 20, 50, 100 }));
+		// wins
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
+				new int[] { 3, 3, 3, 5 }, false, 0, 0));
+		achievements.add(new WinCountAchievement(new int[] { 5000, 10000, 50000 },
+				new int[] { 10, 20, 50 }, false, 0, 0));
 
-		dailyChallenges.add(new RoundCountChallenge(10));
-		dailyChallenges.add(new RoundCountChallenge(20));
-		dailyChallenges.add(new WinCountChallenge(5, false, 0, 0));
-		dailyChallenges.add(new WinCountChallenge(10, false, 0, 0));
-		dailyChallenges.add(new WinCountChallenge(1, false, 4, 0));
-		dailyChallenges.add(new WinCountChallenge(1, false, 5, 0));
-		dailyChallenges.add(new WinCountChallenge(1, true, 0, 0));
-		dailyChallenges.add(new WinCountChallenge(1, false, 0, 1));
-		dailyChallenges.add(new WinCountChallenge(1, false, 0, 3));
-		dailyChallenges.add(new StreakChallenge(2));
-		dailyChallenges.add(new StreakChallenge(3));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500 },
+				new int[] { 3, 3, 5 }, true, 0, 0));
+		achievements.add(new WinCountAchievement(new int[] { 1000, 5000 },
+				new int[] { 10, 50 }, true, 0, 0));
+
+		// playerCount
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
+				new int[] { 3, 5, 5, 10, 50 }, false, 4, 0));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
+				new int[] { 3, 5, 5, 10, 50 }, false, 5, 0));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
+				new int[] { 3, 5, 5, 10, 50 }, false, 9, 0));
+		// score
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
+				new int[] { 3, 3, 5, 10 }, false, 0, 3));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
+				new int[] { 3, 5, 10, 20 }, false, 0, 5));
+
+		// streaks
+		achievements.add(new StreakAchievement(new int[] { 10, 20, 30 },
+				new int[] { 3, 4, 5 }, 3));
+		achievements.add(new StreakAchievement(new int[] { 10, 20, 30 },
+				new int[] { 10, 15, 20 }, 5));
+
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 4 }, 4));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 5 }, 5));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 6 }, 6));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 7 }, 7));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 8 }, 8));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 9 }, 9));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 10 }, 10));
+
+		dailyChallenges.add(new RoundCountAchievement(new int[] { 10 }, new int[] { 1 }));
+		dailyChallenges.add(new RoundCountAchievement(new int[] { 20 }, new int[] { 1 }));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 5 }, new int[] { 1 }, false, 0, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 10 }, new int[] { 1 }, false, 0, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 1 }, false, 4, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 1 }, false, 5, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 2 }, true, 0, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 1 }, false, 0, 1));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 2 }, false, 0, 3));
+		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 1 }, 2));
+		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 2 }, 3));
 	}
 
 	public static void load() {
@@ -1274,15 +1216,35 @@ class Core {
 	public static void updateAchivements() {
 		stat.totalAchievementPoint = 0;
 		for (Achievement a : achievements) {
-			a.update();
+			a.update(0);
 			stat.totalAchievementPoint += a.myPoint;
 		}
+
+		stat.totalDailyPoint = 0;
+		int currentDayKey = 0;
+		for (Round r : Core.rounds) {
+			int dayKey = Core.toDayKey(r.start);
+			if (currentDayKey == 0 || currentDayKey != dayKey) {
+				currentDayKey = dayKey;
+				for (Achievement a : Core.getChallenges(dayKey)) {
+					a.update(dayKey);
+					stat.todayDailyPoint += a.currentValue;
+				}
+			}
+		}
+		stat.todayDailyPoint = 0;
+		/*
+		for (Achievement a : Core.getChallenges(dayKey)) {
+			a.update(dayKey);
+			stat.todayDailyPoint += a.currentValue;
+		}
+		 */
 	}
 
-	public static List<Challenge> getChallenges(int dayKey) {
+	public static List<Achievement> getChallenges(int dayKey) {
 		Random random = new Random(dayKey);
 
-		List<Challenge> result = new ArrayList<>(dailyChallenges);
+		List<Achievement> result = new ArrayList<>(dailyChallenges);
 		Collections.shuffle(result, random);
 		while (result.size() > 3)
 			result.remove(result.size() - 1);
@@ -2233,17 +2195,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
 		//appendToStats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
 
-		appendToStats("Today's challenges", "bold");
-		int dayKey = Core.toDateKey(new Date());
-		stat.totalDailyPoint = 0;
-		for (Challenge c : Core.getChallenges(dayKey)) {
-			boolean complete = c.isComplete(dayKey);
-			if (complete)
-				stat.totalDailyPoint += c.point();
-			appendToStats((complete ? "○" : "  ") + c.toString(), complete ? "bold" : null);
-		}
-
-		appendToStats("Total Points: " + (stat.totalAchievementPoint + stat.totalDailyPoint), "bold");
+		appendToStats("Total Points: " + (stat.totalAchievementPoint + stat.totalDailyPoint + stat.todayDailyPoint),
+				"bold");
 
 		statsArea.setCaretPosition(0);
 	}
@@ -2272,11 +2225,37 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 }
 
 class AchievementPanel extends JPanel {
+	static Font FONT = new Font(FallBallRecord.fontFamily, Font.BOLD, 14);
+	Box dailyBox = Box.createVerticalBox();
+
 	AchievementPanel() {
+		super(new BorderLayout());
+		add(dailyBox, BorderLayout.NORTH);
+		updateDaily();
+
 		Box b = Box.createVerticalBox();
-		add(b);
+		add(b, BorderLayout.CENTER);
+		JLabel l = new JLabel("Achivements", SwingConstants.LEFT);
+		l.setFont(FONT);
+		b.add(l);
 		for (Achievement a : Core.achievements) {
 			b.add(a.panel);
+		}
+	}
+
+	@Override
+	public Insets getInsets() {
+		return new Insets(4, 4, 4, 4);
+	}
+
+	void updateDaily() {
+		dailyBox.removeAll();
+		JLabel l = new JLabel("Daily Challenges", SwingConstants.LEFT);
+		l.setFont(FONT);
+		dailyBox.add(l);
+		for (Achievement a : Core.getChallenges(Core.toDayKey(new Date()))) {
+			dailyBox.add(a.panel);
+			a.panel.setBackground(Color.CYAN);
 		}
 	}
 }
