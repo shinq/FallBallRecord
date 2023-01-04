@@ -1846,6 +1846,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		frame.setTitle("Fall Ball Record");
 		frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 		frame.setVisible(true);
+
+		frame.start();
 	}
 
 	JLabel pingLabel;
@@ -2062,7 +2064,9 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				}
 			}
 		});
+	}
 
+	public void start() {
 		Core.updateStats();
 		Core.updateAchivements();
 		updateRounds();
