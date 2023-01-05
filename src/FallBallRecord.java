@@ -1253,31 +1253,33 @@ class Core {
 
 	public static void updateAchivements() {
 		SwingUtilities.invokeLater(() -> {
-			stat.totalAchievementPoint = 0;
-			for (Achievement a : achievements) {
-				a.update(0);
-				stat.totalAchievementPoint += a.myPoint;
-			}
+			synchronized (Core.listLock) {
+				stat.totalAchievementPoint = 0;
+				for (Achievement a : achievements) {
+					a.update(0);
+					stat.totalAchievementPoint += a.myPoint;
+				}
 
-			stat.totalDailyPoint = 0;
-			int currentDayKey = 0;
-			for (Round r : Core.rounds) {
-				int dayKey = Core.toDayKey(r.start);
-				if (currentDayKey == 0 || currentDayKey != dayKey) {
-					currentDayKey = dayKey;
-					for (Achievement a : Core.getChallenges(dayKey)) {
-						a.update(dayKey);
-						stat.todayDailyPoint += a.currentValue;
+				stat.totalDailyPoint = 0;
+				int currentDayKey = 0;
+				for (Round r : Core.rounds) {
+					int dayKey = Core.toDayKey(r.start);
+					if (currentDayKey == 0 || currentDayKey != dayKey) {
+						currentDayKey = dayKey;
+						for (Achievement a : Core.getChallenges(dayKey)) {
+							a.update(dayKey);
+							stat.todayDailyPoint += a.myPoint;
+						}
 					}
 				}
+				stat.todayDailyPoint = 0;
+				/*
+				for (Achievement a : Core.getChallenges(dayKey)) {
+					a.update(dayKey);
+					stat.todayDailyPoint += a.currentValue;
+				}
+				 */
 			}
-			stat.todayDailyPoint = 0;
-			/*
-			for (Achievement a : Core.getChallenges(dayKey)) {
-				a.update(dayKey);
-				stat.todayDailyPoint += a.currentValue;
-			}
-			 */
 		});
 	}
 
@@ -2256,7 +2258,6 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				+ stat.getRate() + "%)", "bold");
 		appendToStats("Total rate: " + stat.totalWinCount + " / " + stat.totalParticipationCount + " ("
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
-		//appendToStats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
 
 		int p = stat.totalPoint();
 		appendToStats("Total Points: " + stat.totalPoint(), "bold");
