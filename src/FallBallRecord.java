@@ -111,7 +111,6 @@ class Player {
 	int partyId;
 	int teamId;
 	int ranking; // rank of current round
-	boolean disabled;
 
 	Boolean qualified;
 	int score; // ラウンド中のスコアあるいは順位スコア
@@ -146,6 +145,8 @@ class Round implements Comparable<Round> {
 	int[] teamScore;
 	int playerCount;
 	int playerCountAdd;
+	boolean playerCountAddChanged;
+	boolean disableMe;
 	int qualifiedCount;
 	Map<String, Player> byName = new HashMap<String, Player>();
 	Map<Integer, Player> byId = new HashMap<Integer, Player>();
@@ -203,7 +204,7 @@ class Round implements Comparable<Round> {
 
 	public boolean isEnabled() {
 		Player p = getMe();
-		return p != null && !p.disabled;
+		return p != null && !disableMe;
 	}
 
 	public boolean isDate(int dayKey) {
@@ -216,6 +217,11 @@ class Round implements Comparable<Round> {
 
 	public boolean isCustomFallBall() {
 		return isFallBall() && "event_only_fall_ball_template".equals(match.name);
+	}
+
+	// デフォルトで20以下奇数時は -1 補正する。
+	public int adjustPlayerCount() {
+		return playerCount < 20 ? -playerCount % 2 : 0;
 	}
 
 	public int getSubstancePlayerCount() {
@@ -346,7 +352,7 @@ class Round implements Comparable<Round> {
 			buf.append(" ").append((double) getTime(myFinish) / 1000).append("s");
 		buf.append(" ").append(match.ip);
 		buf.append(" ").append(match.pingMS).append("ms");
-		if (p.disabled)
+		if (disableMe)
 			buf.append(" ☓");
 		return new String(buf);
 	}
@@ -677,7 +683,8 @@ class RoundCountAchievement extends Achievement {
 
 	@Override
 	public void calcCurrentValue(int dayKey) {
-		currentValue = Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && (dayKey == 0 || r.isDate(dayKey)))
+		currentValue = Core.filter(
+				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey)))
 				.size();
 	}
 
@@ -715,7 +722,7 @@ class WinCountAchievement extends Achievement {
 						if (thresholdScoreDiff > 1 && scoreDiff < thresholdScoreDiff)
 							return false;
 					}
-					return r.isFallBall() && r.isCustomFallBall() && r.isQualified()
+					return r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isQualified()
 							&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000))
 							&& (dayKey == 0 || r.isDate(dayKey));
 				})
@@ -744,7 +751,8 @@ class StreakAchievement extends Achievement {
 		currentValue = 0;
 		int streak = 0;
 		for (Round r : Core.filter(
-				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey)))) {
+				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled()
+						&& (dayKey == 0 || r.isDate(dayKey)))) {
 			if (r.isQualified()) {
 				streak += 1;
 				if (targetStreak == streak)
@@ -973,47 +981,48 @@ class Core {
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 50 }, 65, 100));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 100 }, 70, 100));
 		// rounds
-		achievements.add(new RoundCountAchievement(new int[] { 100, 500, 1000 },
-				new int[] { 1, 3, 3 }));
-		achievements.add(new RoundCountAchievement(new int[] { 5000, 10000, 20000, 50000, 100000 },
-				new int[] { 5, 10, 20, 50, 100 }));
+		achievements.add(new RoundCountAchievement(new int[] { 500, 1000, 2500 },
+				new int[] { 5, 5, 5 }));
+		achievements.add(new RoundCountAchievement(
+				new int[] { 5000, 7500, 10000, 12500, 15000, 17500, 20000, 22500, 25000, 27500, 30000 },
+				new int[] { 5, 8, 10, 13, 15, 18, 20, 23, 25, 28, 30 }));
 		// wins
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
-				new int[] { 3, 3, 3, 5 }, false, 0, 0));
-		achievements.add(new WinCountAchievement(new int[] { 5000, 10000, 50000 },
-				new int[] { 10, 20, 50 }, false, 0, 0));
+		achievements.add(new WinCountAchievement(new int[] { 500, 1000, 2500 },
+				new int[] { 5, 5, 5 }, false, 0, 0));
+		achievements.add(new WinCountAchievement(new int[] { 5000, 7500, 10000, 12500, 15000, 17500, 20000 },
+				new int[] { 10, 15, 20, 25, 30, 35, 40 }, false, 0, 0));
 
 		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500 },
-				new int[] { 3, 3, 5 }, true, 0, 0));
-		achievements.add(new WinCountAchievement(new int[] { 1000, 5000 },
-				new int[] { 10, 50 }, true, 0, 0));
+				new int[] { 5, 5, 10 }, true, 0, 0));
+		achievements.add(new WinCountAchievement(new int[] { 750, 1000 },
+				new int[] { 15, 20 }, true, 0, 0));
 
 		// playerCount
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
-				new int[] { 3, 5, 5, 10, 50 }, false, 4, 0));
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
-				new int[] { 3, 5, 5, 10, 50 }, false, 5, 0));
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 5000 },
-				new int[] { 3, 5, 5, 10, 50 }, false, 9, 0));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 1500, 2000 },
+				new int[] { 5, 5, 5, 10, 15, 20 }, false, 4, 0));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 1500, 2000 },
+				new int[] { 5, 5, 5, 10, 15, 20 }, false, 5, 0));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000, 1500, 2000 },
+				new int[] { 5, 5, 5, 10, 15, 20 }, false, 9, 0));
 		// score
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
-				new int[] { 3, 3, 5, 10 }, false, 0, 3));
-		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 1000 },
-				new int[] { 3, 5, 10, 20 }, false, 0, 5));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 750, 1000 },
+				new int[] { 5, 5, 10, 15, 20 }, false, 0, 3));
+		achievements.add(new WinCountAchievement(new int[] { 50, 100, 500, 750, 1000 },
+				new int[] { 5, 5, 10, 15, 20 }, false, 0, 5));
 
 		// streaks
 		achievements.add(new StreakAchievement(new int[] { 10, 20, 30 },
-				new int[] { 3, 4, 5 }, 3));
+				new int[] { 10, 15, 20 }, 3));
 		achievements.add(new StreakAchievement(new int[] { 10, 20, 30 },
 				new int[] { 10, 15, 20 }, 5));
 
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 4 }, 4));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 5 }, 5));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 6 }, 6));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 7 }, 7));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 8 }, 8));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 9 }, 9));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 10 }, 10));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 4 }, 8));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 5 }, 10));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 6 }, 12));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 7 }, 14));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 8 }, 16));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 9 }, 18));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 10 }, 20));
 
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 10 }, new int[] { 1 }));
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 20 }, new int[] { 1 }));
@@ -1053,20 +1062,22 @@ class Core {
 				r.roundName2 = d[4];
 				r.fixed = true;
 
+				r.playerCount = Integer.parseInt(d[6]);
 				r.qualifiedCount = Integer.parseInt(d[7]);
 				if (d[8].length() > 0)
 					r.myFinish = r.end = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
 				Player p = new Player(0);
 				p.name = "YOU";
 				p.qualified = "true".equals(d[9]);
-				p.disabled = "true".equals(d[10]);
+				r.disableMe = "true".equals(d[10]);
 				r.playerCountAdd = Integer.parseInt(d[11]);
+				r.playerCountAddChanged = r.playerCountAdd != r.adjustPlayerCount();
 				p.teamId = Integer.parseInt(d[12]);
 				if (d.length > 13)
 					r.teamScore = Core.intArrayFromString(d[13]);
 				r.add(p);
 				addRound(r);
-				r.playerCount = Integer.parseInt(d[6]);
+				r.playerCount = Integer.parseInt(d[6]); // reset
 			}
 		} catch (Exception ex) {
 			ex.printStackTrace();
@@ -1129,7 +1140,7 @@ class Core {
 				out.print("\t");
 				out.print(p.isQualified()); // 9
 				out.print("\t");
-				out.print(p.disabled); // 10
+				out.print(r.disableMe); // 10
 				out.print("\t");
 				out.print(r.playerCountAdd); // 11
 				out.print("\t");
@@ -1166,7 +1177,10 @@ class Core {
 			r.match.addRound(r);
 			int i = rounds.indexOf(r);
 			if (i >= 0) {
-				rounds.remove(i);
+				Round o = rounds.remove(i);
+				r.playerCountAdd = o.playerCountAdd;
+				r.playerCountAddChanged = o.playerCountAddChanged;
+				r.disableMe = o.disableMe;
 				rounds.add(i, r);
 			} else
 				rounds.add(r);
@@ -1201,7 +1215,7 @@ class Core {
 		synchronized (listLock) {
 			stat.reset();
 			for (Round r : filter(filter, limit, true)) {
-				if (!r.fixed || r.getSubstanceQualifiedCount() == 0)
+				if (!r.fixed || !r.isEnabled() || r.getSubstanceQualifiedCount() == 0)
 					continue;
 
 				// このラウンドの参加者の結果を反映
@@ -1252,7 +1266,7 @@ class Core {
 	public static List<Achievement> getChallenges(int dayKey) {
 		Random random = new Random(dayKey);
 
-		List<Achievement> result = new ArrayList<>(dailyChallenges);
+		List<Achievement> result = new ArrayList<>(dailyChallenges); // copy
 		Collections.shuffle(result, random);
 		while (result.size() > 3)
 			result.remove(result.size() - 1);
@@ -1739,7 +1753,8 @@ class FGReader extends TailerListenerAdapter {
 					}
 				}
 				// fallball 専用処理
-				r.playerCountAdd = r.playerCount < 20 ? -r.playerCount % 2 : 0; // デフォルトで20以下奇数時は -1 補正する。
+				if (!r.playerCountAddChanged)
+					r.playerCountAdd = r.adjustPlayerCount(); // デフォルトで20以下奇数時は -1 補正する。
 				Core.currentMatch.end = getTime(line);
 				// 優勝画面に行ったらそのラウンドをファイナル扱いとする
 				// final マークがつかないファイナルや、通常ステージで一人生き残り優勝のケースを補填するためだが
@@ -2167,11 +2182,11 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	private void removePlayerOnCurrentRound() {
 		Round r = getSelectedRound();
 		Player p = r.getMe();
-		p.disabled = !p.disabled;
-		r.playerCount += p.disabled ? -1 : 1;
+		r.disableMe = !r.disableMe;
+		r.playerCount += r.disableMe ? -1 : 1;
 		if (p.isQualified())
-			r.qualifiedCount += p.disabled ? -1 : 1;
-		r.playerCountAdd = r.playerCount < 20 ? -r.playerCount % 2 : 0; // デフォルトで20以下奇数時は -1 補正する。
+			r.qualifiedCount += r.disableMe ? -1 : 1;
+		r.playerCountAdd = r.adjustPlayerCount();
 		updateRounds();
 		Core.updateStats();
 		displayStats();
@@ -2179,6 +2194,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	private void adjustPlayerCountOnCurrentRound() {
 		Round r = getSelectedRound();
+		r.playerCountAddChanged = !r.playerCountAddChanged;
 		if (r.playerCountAdd != 0)
 			r.playerCountAdd = 0;
 		else
