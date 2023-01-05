@@ -386,7 +386,6 @@ class Match {
 			} else
 				rounds.add(r);
 		}
-		Core.filter(Core.filter, Core.limit, true);
 	}
 
 	public void finished(Date end) {
@@ -405,6 +404,10 @@ class Match {
 
 	public boolean isCurrentSession() {
 		return session == Core.currentSession;
+	}
+
+	public boolean isDate(int dayKey) {
+		return dayKey == Core.toDayKey(start);
 	}
 
 	@Override
@@ -938,6 +941,9 @@ class Core {
 	public static RoundFilter filter = new CurrentSessionRoundFilter();
 	public static int limit = 0;
 	public static long currentSession;
+	public static int currentYear;
+	public static int currentMonth;
+	public static int currentDate;
 	public static String currentServerIp;
 	public static final List<Match> matches = new ArrayList<>();
 	public static final List<Round> rounds = new ArrayList<>();
@@ -1139,6 +1145,7 @@ class Core {
 	}
 
 	public static void addMatch(Match m) {
+		currentMatch = m;
 		synchronized (listLock) {
 			// 既にあれば差し替え
 			int i = matches.indexOf(m);
@@ -1150,20 +1157,19 @@ class Core {
 			// 直前のマッチのラウンド０だったら除去
 			if (matches.size() > 2 && matches.get(matches.size() - 2).rounds.size() == 0)
 				matches.remove(matches.size() - 2);
-			currentMatch = m;
 		}
 	}
 
 	public static void addRound(Round r) {
+		currentRound = r;
 		synchronized (listLock) {
+			r.match.addRound(r);
 			int i = rounds.indexOf(r);
 			if (i >= 0) {
 				rounds.remove(i);
 				rounds.add(i, r);
 			} else
 				rounds.add(r);
-			currentRound = r;
-			currentMatch.addRound(r);
 		}
 	}
 
@@ -1214,31 +1220,33 @@ class Core {
 	}
 
 	public static void updateAchivements() {
-		stat.totalAchievementPoint = 0;
-		for (Achievement a : achievements) {
-			a.update(0);
-			stat.totalAchievementPoint += a.myPoint;
-		}
+		SwingUtilities.invokeLater(() -> {
+			stat.totalAchievementPoint = 0;
+			for (Achievement a : achievements) {
+				a.update(0);
+				stat.totalAchievementPoint += a.myPoint;
+			}
 
-		stat.totalDailyPoint = 0;
-		int currentDayKey = 0;
-		for (Round r : Core.rounds) {
-			int dayKey = Core.toDayKey(r.start);
-			if (currentDayKey == 0 || currentDayKey != dayKey) {
-				currentDayKey = dayKey;
-				for (Achievement a : Core.getChallenges(dayKey)) {
-					a.update(dayKey);
-					stat.todayDailyPoint += a.currentValue;
+			stat.totalDailyPoint = 0;
+			int currentDayKey = 0;
+			for (Round r : Core.rounds) {
+				int dayKey = Core.toDayKey(r.start);
+				if (currentDayKey == 0 || currentDayKey != dayKey) {
+					currentDayKey = dayKey;
+					for (Achievement a : Core.getChallenges(dayKey)) {
+						a.update(dayKey);
+						stat.todayDailyPoint += a.currentValue;
+					}
 				}
 			}
-		}
-		stat.todayDailyPoint = 0;
-		/*
-		for (Achievement a : Core.getChallenges(dayKey)) {
-			a.update(dayKey);
-			stat.todayDailyPoint += a.currentValue;
-		}
-		 */
+			stat.todayDailyPoint = 0;
+			/*
+			for (Achievement a : Core.getChallenges(dayKey)) {
+				a.update(dayKey);
+				stat.todayDailyPoint += a.currentValue;
+			}
+			 */
+		});
 	}
 
 	public static List<Achievement> getChallenges(int dayKey) {
@@ -1332,6 +1340,8 @@ class FGReader extends TailerListenerAdapter {
 		}
 	}
 
+	static Pattern patternDateDetect = Pattern
+			.compile("(\\d\\d\\d\\d-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d).\\d\\d\\d LogEOS ");
 	static Pattern patternLaunch = Pattern
 			.compile("\\[FGClient.GlobalInitialisation\\] Active Scene is 'Init'");
 	static Pattern patternServer = Pattern
@@ -1363,6 +1373,7 @@ class FGReader extends TailerListenerAdapter {
 	static Pattern patternPlayerResult2 = Pattern.compile(
 			"-playerId:(\\d+) points:(\\d+) isfinal:([^\\s]+) name:");
 
+	static DateFormat date8601Local = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
 	static DateFormat f = new SimpleDateFormat("HH:mm:ss.SSS");
 	static {
 		f.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -1373,6 +1384,9 @@ class FGReader extends TailerListenerAdapter {
 			Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
 			Calendar parsed = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
 			parsed.setTime(f.parse(line.substring(0, 12)));
+			c.set(Calendar.YEAR, Core.currentYear);
+			c.set(Calendar.MONTH, Core.currentMonth);
+			c.set(Calendar.DAY_OF_MONTH, Core.currentDate);
 			c.set(Calendar.HOUR_OF_DAY, parsed.get(Calendar.HOUR_OF_DAY));
 			c.set(Calendar.MINUTE, parsed.get(Calendar.MINUTE));
 			c.set(Calendar.SECOND, parsed.get(Calendar.SECOND));
@@ -1389,6 +1403,19 @@ class FGReader extends TailerListenerAdapter {
 		Matcher m = patternLaunch.matcher(line);
 		if (m.find()) {
 			Core.currentSession = getTime(line).getTime();
+			return;
+		}
+		m = patternDateDetect.matcher(line);
+		if (m.find()) {
+			try {
+				Calendar c = Calendar.getInstance(); // local timezone
+				c.setTime(date8601Local.parse(m.group(1)));
+				Core.currentYear = c.get(Calendar.YEAR);
+				Core.currentMonth = c.get(Calendar.MONTH);
+				Core.currentDate = c.get(Calendar.DAY_OF_MONTH);
+			} catch (ParseException e) {
+				//e.printStackTrace();
+			}
 			return;
 		}
 		/*
@@ -2119,7 +2146,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	public void roundUpdated() {
 		/*
 		SwingUtilities.invokeLater(() -> {
-			if (Core.getCurrentRound() == getSelectedRound())
+			if (Core.currentRound == getSelectedRound())
 				refreshRoundDetail(getSelectedRound());
 		});
 		*/
