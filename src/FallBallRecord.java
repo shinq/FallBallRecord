@@ -98,6 +98,21 @@ class PlayerStat {
 	public void reset() {
 		totalParticipationCount = totalWinCount = participationCount = winCount = 0;
 	}
+
+	public int totalPoint() {
+		return totalAchievementPoint + totalDailyPoint + todayDailyPoint;
+	}
+
+	public String getTitle() {
+		int p = totalPoint();
+		int i = 0;
+		for (; i < Core.titledPoints.length; i += 1) {
+			if (p < Core.titledPoints[i]) {
+				return Core.titles[i];
+			}
+		}
+		return Core.titles[i];
+	}
 }
 
 //各ラウンドのプレイヤー戦績
@@ -611,7 +626,7 @@ class GraphPanel extends JPanel {
 		int max = threasholds[threasholds.length - 1];
 		g.setColor(Color.RED);
 		g.fillRect(1, 1, (w - 2) * currentValue / max, h - 2);
-		g.setColor(Color.GREEN);
+		g.setColor(Color.BLUE);
 		for (int x : threasholds) {
 			if (x == max)
 				break;
@@ -967,7 +982,7 @@ class Core {
 	static final DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
 	static {
 		f.setTimeZone(TimeZone.getTimeZone("UTC"));
-		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 3 }, 55, 30));
+		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 5 }, 55, 30));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 5 }, 60, 30));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 10 }, 65, 30));
 		achievements.add(new RateAchievement(new int[] { 1 }, new int[] { 20 }, 70, 30));
@@ -1036,6 +1051,9 @@ class Core {
 		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 1 }, 2));
 		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 2 }, 3));
 	}
+	static final int[] titledPoints = new int[] { 100, 1000, 3000, 7000, 10000 };
+	static final String[] titles = new String[] { "名もなきフォールボーラー", "さすらいのフォールボーラー", "フォルボジャンキー", "フォルボ地元代表", "フォルボエンペラー",
+			"協会公認フォルボマスター" };
 
 	public static void load() {
 		rounds.clear();
@@ -1856,6 +1874,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	JLabel pingLabel;
 	JTextPane statsArea;
+	AchievementPanel achievementPanel;
 	JList<Round> roundsSel;
 	JComboBox<RoundFilter> filterSel;
 	JComboBox<Integer> limitSel;
@@ -1877,7 +1896,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		p.add(label);
 		JLabel statsLabel = label;
 
-		final int COL2_X = COL1_X + FONT_SIZE_RANK * 15 + 10;
+		final int COL2_X = COL1_X + FONT_SIZE_RANK * 18 + 10;
 		final int COL3_X = COL2_X + 340;
 
 		label = new JLabel(Core.RES.getString("matchList"));
@@ -1985,8 +2004,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(120, 20);
 		p.add(label);
 
-		AchievementPanel AchievementPanel = new AchievementPanel();
-		p.add(scroller = new JScrollPane(AchievementPanel));
+		achievementPanel = new AchievementPanel();
+		p.add(scroller = new JScrollPane(achievementPanel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL2_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, COL3_X - 10, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
@@ -2171,6 +2190,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	public void roundDone() {
 		SwingUtilities.invokeLater(() -> {
 			Core.updateAchivements();
+			achievementPanel.updateDaily();
 			updateRounds();
 		});
 	}
@@ -2234,12 +2254,28 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		PlayerStat stat = Core.stat;
 		appendToStats(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
 				+ stat.getRate() + "%)", "bold");
-		appendToStats("total: " + stat.totalWinCount + "/" + stat.totalParticipationCount + " ("
+		appendToStats("Total rate: " + stat.totalWinCount + " / " + stat.totalParticipationCount + " ("
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
 		//appendToStats("start date     |Win|Players|Aj|Score|Time   |Ping", "bold");
 
-		appendToStats("Total Points: " + (stat.totalAchievementPoint + stat.totalDailyPoint + stat.todayDailyPoint),
-				"bold");
+		int p = stat.totalPoint();
+		appendToStats("Total Points: " + stat.totalPoint(), "bold");
+		appendToStats("[" + stat.getTitle() + "]", "bold");
+
+		for (int i = 0; i < Core.titledPoints.length; i += 1) {
+			if (p < Core.titledPoints[i]) {
+				appendToStats("->" + Core.titledPoints[i] + " points", null);
+				appendToStats("[" + Core.titles[i + 1] + "]", null);
+				break;
+			}
+		}
+
+		Match m = Core.currentMatch;
+		if (m == null)
+			return;
+		appendToStats("", null);
+		appendToStats("Current Match: ", null);
+		appendToStats(m.ip + "(" + m.pingMS + "ms)", null);
 
 		statsArea.setCaretPosition(0);
 	}
