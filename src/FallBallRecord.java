@@ -1268,7 +1268,7 @@ class Core {
 						currentDayKey = dayKey;
 						for (Achievement a : Core.getChallenges(dayKey)) {
 							a.update(dayKey);
-							stat.todayDailyPoint += a.myPoint;
+							stat.totalDailyPoint += a.myPoint;
 						}
 					}
 				}
@@ -1784,7 +1784,6 @@ class FGReader extends TailerListenerAdapter {
 					r.isFinal = true;
 					Core.currentMatch.finished(getTime(line));
 				}
-				Core.updateStats();
 				listener.roundDone();
 				readState = ReadState.ROUND_DETECTING;
 				return;
@@ -2191,6 +2190,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	@Override
 	public void roundDone() {
 		SwingUtilities.invokeLater(() -> {
+			Core.updateStats();
 			Core.updateAchivements();
 			achievementPanel.updateDaily();
 			updateRounds();
