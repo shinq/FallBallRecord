@@ -1016,13 +1016,13 @@ class Core {
 		achievements.add(new StreakAchievement(new int[] { 10, 20, 30 },
 				new int[] { 10, 15, 20 }, 5));
 
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 4 }, 8));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 5 }, 10));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 6 }, 12));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 7 }, 14));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 8 }, 16));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 9 }, 18));
-		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 10 }, 20));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 8 }, 4));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 10 }, 5));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 12 }, 6));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 14 }, 7));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 16 }, 8));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 18 }, 9));
+		achievements.add(new StreakAchievement(new int[] { 1 }, new int[] { 20 }, 10));
 
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 10 }, new int[] { 1 }));
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 20 }, new int[] { 1 }));
