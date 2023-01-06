@@ -626,6 +626,7 @@ class GraphPanel extends JPanel {
 			return;
 		int w = getWidth(), h = getHeight();
 		int max = threasholds[threasholds.length - 1];
+		g.clearRect(0, 0, w, h);
 		g.setColor(Color.RED);
 		g.fillRect(1, 1, (w - 2) * currentValue / max, h - 2);
 		g.setColor(Color.BLUE);
@@ -666,7 +667,7 @@ abstract class Achievement {
 		//if (currentValue > max) currentValue = max;
 		progressGraph.currentValue = currentValue < max ? currentValue : max;
 		progressGraph.threasholds = threasholds;
-		progressGraph.invalidate();
+		progressGraph.repaint();
 		label.setText(toString());
 		progressLabel.setText(
 				currentValue + "/" + max + " (" + Core.calRate(currentValue < max ? currentValue : max, max) + "%)");
