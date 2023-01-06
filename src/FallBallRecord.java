@@ -54,6 +54,7 @@ import java.util.TimerTask;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
@@ -68,6 +69,7 @@ import javax.swing.SpringLayout;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
+import javax.swing.border.BevelBorder;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.DefaultStyledDocument;
 import javax.swing.text.Style;
@@ -1042,7 +1044,7 @@ class Core {
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 10 }, new int[] { 1 }));
 		dailyChallenges.add(new RoundCountAchievement(new int[] { 20 }, new int[] { 1 }));
 		dailyChallenges.add(new WinCountAchievement(new int[] { 5 }, new int[] { 1 }, false, 0, 0));
-		dailyChallenges.add(new WinCountAchievement(new int[] { 10 }, new int[] { 1 }, false, 0, 0));
+		dailyChallenges.add(new WinCountAchievement(new int[] { 10 }, new int[] { 2 }, false, 0, 0));
 		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 1 }, false, 4, 0));
 		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 1 }, false, 5, 0));
 		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 2 }, true, 0, 0));
@@ -2277,6 +2279,9 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		appendToStats("", null);
 		appendToStats("Current Match: ", null);
 		appendToStats(m.ip + "(" + m.pingMS + "ms)", null);
+		Map<String, String> server = Core.servers.get(m.ip);
+		if (server != null)
+			appendToStats(server.get("country") + "/" + server.get("regionName"), null);
 
 		statsArea.setCaretPosition(0);
 	}
@@ -2310,10 +2315,13 @@ class AchievementPanel extends JPanel {
 
 	AchievementPanel() {
 		super(new BorderLayout());
+		dailyBox.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createBevelBorder(BevelBorder.LOWERED),
+				BorderFactory.createEmptyBorder(2, 2, 2, 2)));
 		add(dailyBox, BorderLayout.NORTH);
 		updateDaily();
 
 		Box b = Box.createVerticalBox();
+		//b.setBorder(BorderFactory.createBevelBorder(BevelBorder.LOWERED));
 		add(b, BorderLayout.CENTER);
 		JLabel l = new JLabel("Achivements", SwingConstants.LEFT);
 		l.setFont(FONT);
@@ -2328,6 +2336,8 @@ class AchievementPanel extends JPanel {
 		return new Insets(4, 4, 4, 4);
 	}
 
+	static final Color BACKGROUND = new Color(0xffffcc);
+
 	void updateDaily() {
 		dailyBox.removeAll();
 		JLabel l = new JLabel("Daily Challenges", SwingConstants.LEFT);
@@ -2335,7 +2345,8 @@ class AchievementPanel extends JPanel {
 		dailyBox.add(l);
 		for (Achievement a : Core.getChallenges(Core.toDayKey(new Date()))) {
 			dailyBox.add(a.panel);
-			a.panel.setBackground(Color.CYAN);
+			a.panel.setBackground(BACKGROUND);
+			a.panel.setPreferredSize(new Dimension(80, 40));
 		}
 	}
 }
