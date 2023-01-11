@@ -57,6 +57,7 @@ import java.util.regex.Pattern;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.DefaultListModel;
+import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
@@ -105,15 +106,15 @@ class PlayerStat {
 		return totalAchievementPoint + totalDailyPoint + todayDailyPoint;
 	}
 
-	public String getTitle() {
+	public int getTitleIndex() {
 		int p = totalPoint();
 		int i = 0;
 		for (; i < Core.titledPoints.length; i += 1) {
 			if (p < Core.titledPoints[i]) {
-				return Core.titles[i];
+				return i;
 			}
 		}
-		return Core.titles[i];
+		return i;
 	}
 }
 
@@ -641,6 +642,34 @@ class GraphPanel extends JPanel {
 	}
 }
 
+class TitlePanel extends JLabel {
+	GraphPanel graph = new GraphPanel();
+	JLabel text = new JLabel();
+
+	TitlePanel() {
+		ImageIcon icon = new ImageIcon(getClass().getResource("b0.png"));
+		setIcon(icon);
+		setLayout(null);
+		setSize(icon.getIconWidth(), icon.getIconHeight());
+		add(graph);
+		graph.setBounds(new Rectangle(68, 36, 100, 20));
+		add(text);
+		text.setHorizontalAlignment(SwingConstants.RIGHT);
+		text.setForeground(Color.white);
+		text.setBounds(new Rectangle(170, 36, 58, 20));
+	}
+
+	void update() {
+		int i = Core.stat.getTitleIndex();
+		int p = Core.stat.totalPoint();
+		text.setText(p + "/" + Core.titledPoints[i]);
+		graph.currentValue = p;
+		graph.threasholds = new int[] { Core.titledPoints[i] };
+		setIcon(new ImageIcon(getClass().getResource("b" + i + ".png")));
+		repaint();
+	}
+}
+
 abstract class Achievement {
 	int currentValue;
 	int myPoint;
@@ -911,10 +940,33 @@ class ManyAllyCustomRoundFilter implements RoundFilter {
 	}
 }
 
+class PlayerCountRoundFilter implements RoundFilter {
+	int count;
+
+	public PlayerCountRoundFilter(int count) {
+		this.count = count;
+	}
+
+	@Override
+	public boolean isEnabled(Round r) {
+		if (!r.isCustomFallBall())
+			return false;
+		if (count > 7)
+			return r.getSubstanceQualifiedCount() >= count;
+		return r.getSubstanceQualifiedCount() == count;
+	}
+
+	@Override
+	public String toString() {
+		return count + "vs" + count + (count > 7 ? "over" : "") + "(Custom)";
+	}
+}
+
 class Core {
 	static Locale LANG;
 	static ResourceBundle RES;
 	static Object listLock = new Object();
+	static boolean started = false;
 
 	// utilities
 	public static double calRate(int win, int round) {
@@ -964,7 +1016,7 @@ class Core {
 	*/
 
 	//////////////////////////////////////////////////////////////
-	public static RoundFilter filter = new CurrentSessionRoundFilter();
+	public static RoundFilter filter = new AllRoundFilter();
 	public static int limit = 0;
 	public static long currentSession;
 	public static int currentYear;
@@ -1055,8 +1107,6 @@ class Core {
 		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 2 }, 3));
 	}
 	static final int[] titledPoints = new int[] { 100, 1000, 3000, 7000, 10000 };
-	static final String[] titles = new String[] { "名もなきフォールボーラー", "さすらいのフォールボーラー", "フォルボジャンキー", "フォルボ地元代表", "フォルボエンペラー",
-			"協会公認フォルボマスター" };
 
 	public static void load() {
 		rounds.clear();
@@ -1233,6 +1283,8 @@ class Core {
 	}
 
 	public static void updateStats() {
+		if (!started)
+			return;
 		synchronized (listLock) {
 			stat.reset();
 			for (Round r : filter(filter, limit, true)) {
@@ -1255,6 +1307,8 @@ class Core {
 	}
 
 	public static void updateAchivements() {
+		if (!started)
+			return;
 		SwingUtilities.invokeLater(() -> {
 			synchronized (Core.listLock) {
 				stat.totalAchievementPoint = 0;
@@ -1871,13 +1925,21 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		frame.setBounds(winRect.x, winRect.y, winRect.width, winRect.height);
 		frame.setTitle("Fall Ball Record");
 		frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-		frame.setVisible(true);
 
-		frame.start();
+		frame.readLog();
+
+		frame.setVisible(true);
+		Core.started = true;
+		Core.updateStats();
+		Core.updateAchivements();
+		frame.updateRounds();
+
+		reader.start();
 	}
 
 	JLabel pingLabel;
 	JTextPane statsArea;
+	TitlePanel titlePanel;
 	AchievementPanel achievementPanel;
 	JList<Round> roundsSel;
 	JComboBox<RoundFilter> filterSel;
@@ -1914,6 +1976,12 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.WEST, label, COL3_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
 		label.setSize(100, 20);
+		p.add(label);
+
+		label = new JLabel("v0.3");
+		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
+		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
 		p.add(label);
 
 		// under
@@ -1957,13 +2025,18 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		JScrollPane scroller;
 
+		titlePanel = new TitlePanel();
+		p.add(titlePanel);
+		l.putConstraint(SpringLayout.WEST, titlePanel, COL1_X, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, titlePanel, 8, SpringLayout.SOUTH, statsLabel);
+
 		statsArea = new NoWrapJTextPane(rdoc);
 		statsArea.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_RANK));
 		statsArea.setMargin(new Insets(8, 8, 8, 8));
 		p.add(scroller = new JScrollPane(statsArea));
 		l.putConstraint(SpringLayout.WEST, scroller, COL1_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, COL2_X - 10, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, statsLabel);
+		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, titlePanel);
 		l.putConstraint(SpringLayout.SOUTH, scroller, -100, SpringLayout.SOUTH, p);
 
 		filterSel = new JComboBox<RoundFilter>();
@@ -1971,10 +2044,15 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.WEST, filterSel, COL1_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, filterSel, -90, SpringLayout.SOUTH, p);
 		filterSel.setSize(95, 20);
-		filterSel.addItem(new CurrentSessionRoundFilter());
 		filterSel.addItem(new AllRoundFilter());
+		filterSel.addItem(new CurrentSessionRoundFilter());
 		filterSel.addItem(new CustomRoundFilter());
 		filterSel.addItem(new NotCustomRoundFilter());
+		filterSel.addItem(new PlayerCountRoundFilter(4));
+		filterSel.addItem(new PlayerCountRoundFilter(5));
+		filterSel.addItem(new PlayerCountRoundFilter(6));
+		filterSel.addItem(new PlayerCountRoundFilter(7));
+		filterSel.addItem(new PlayerCountRoundFilter(8));
 		filterSel.addItem(new FewAllyCustomRoundFilter());
 		filterSel.addItem(new ManyAllyCustomRoundFilter());
 		filterSel.addItemListener(ev -> {
@@ -1995,6 +2073,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		limitSel.addItem(50);
 		limitSel.addItem(100);
 		limitSel.addItem(500);
+		limitSel.setSelectedItem(100);
 		limitSel.addItemListener(ev -> {
 			Core.limit = (int) limitSel.getSelectedItem();
 			Core.updateStats();
@@ -2093,19 +2172,15 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		});
 	}
 
-	public void start() {
-		Core.updateStats();
-		Core.updateAchivements();
-		updateRounds();
-
+	public void readLog() {
 		// start log read
 		reader = new FGReader(
 				new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player.log"), this);
-		readLog(new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player-prev.log"));
-		reader.start();
+		readLogInternal(
+				new File(FileUtils.getUserDirectory(), "AppData/LocalLow/Mediatonic/FallGuys_client/Player-prev.log"));
 	}
 
-	void readLog(File log) {
+	void readLogInternal(File log) {
 		try (BufferedReader in = new BufferedReader(
 				new InputStreamReader(new FileInputStream(log), StandardCharsets.UTF_8))) {
 			String line;
@@ -2167,6 +2242,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	@Override
 	public void showUpdated() {
+		if (!Core.started)
+			return;
 		SwingUtilities.invokeLater(() -> {
 			updateMatches();
 		});
@@ -2174,6 +2251,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	@Override
 	public void roundStarted() {
+		if (!Core.started)
+			return;
 		SwingUtilities.invokeLater(() -> {
 			Core.updateStats();
 			updateRounds();
@@ -2183,6 +2262,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	@Override
 	public void roundUpdated() {
 		/*
+		if (!Core.started)
+			return;
 		SwingUtilities.invokeLater(() -> {
 			if (Core.currentRound == getSelectedRound())
 				refreshRoundDetail(getSelectedRound());
@@ -2192,6 +2273,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 	@Override
 	public void roundDone() {
+		if (!Core.started)
+			return;
 		SwingUtilities.invokeLater(() -> {
 			Core.updateStats();
 			Core.updateAchivements();
@@ -2264,6 +2347,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		int p = stat.totalPoint();
 		appendToStats("Total Points: " + stat.totalPoint(), "bold");
+		/*
 		appendToStats("[" + stat.getTitle() + "]", "bold");
 
 		for (int i = 0; i < Core.titledPoints.length; i += 1) {
@@ -2273,6 +2357,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				break;
 			}
 		}
+		*/
 
 		Match m = Core.currentMatch;
 		if (m == null)
@@ -2285,6 +2370,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			appendToStats(server.get("country") + "/" + server.get("regionName"), null);
 
 		statsArea.setCaretPosition(0);
+
+		titlePanel.update();
 	}
 
 	static final SimpleDateFormat f = new SimpleDateFormat("HH:mm:ss", Locale.JAPAN);
