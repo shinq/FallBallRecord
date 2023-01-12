@@ -1529,7 +1529,6 @@ class FGReader extends TailerListenerAdapter {
 				long now = System.currentTimeMillis();
 				if (match.pingMS == 0 || prevNetworkCheckedTime + 60 * 1000 < now) {
 					Core.currentServerIp = ip;
-					prevNetworkCheckedTime = now;
 					// ping check
 					try {
 						InetAddress address = InetAddress.getByName(ip);
@@ -1552,6 +1551,7 @@ class FGReader extends TailerListenerAdapter {
 					} catch (IOException e) {
 						e.printStackTrace();
 					}
+					prevNetworkCheckedTime = System.currentTimeMillis();
 				}
 			}
 			listener.showUpdated();
@@ -1978,7 +1978,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3");
+		label = new JLabel("v0.3.1");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2206,8 +2206,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 					model.addElement(r);
 				}
 			}
-			roundsSel.setSelectedIndex(0);
-			roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
+			//roundsSel.setSelectedIndex(0);
+			//roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
 			displayStats();
 		}
 	}
@@ -2316,6 +2316,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		if (r == null) {
 			return;
 		}
+		/*
 		System.out.println(r.topFinish);
 		System.out.println(r.myFinish);
 		System.out.println(r.end);
@@ -2334,6 +2335,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				System.out.println(new String(buf));
 			}
 		}
+		*/
 	}
 
 	void displayStats() {
