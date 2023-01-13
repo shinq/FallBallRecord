@@ -28,6 +28,8 @@ import java.net.ServerSocket;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -1021,7 +1023,7 @@ class Core {
 	public static long currentSession;
 	public static int currentYear;
 	public static int currentMonth;
-	public static int currentDate;
+	public static int currentUTCDate;
 	public static String currentServerIp;
 	public static final List<Match> matches = new ArrayList<>();
 	public static final List<Round> rounds = new ArrayList<>();
@@ -1156,6 +1158,10 @@ class Core {
 	}
 
 	public static void save() {
+		try {
+			Files.copy(Paths.get("stats.tsv"), Paths.get("stats_prev.tsv"));
+		} catch (IOException e) {
+		}
 		try (PrintWriter out = new PrintWriter(
 				new OutputStreamWriter(new FileOutputStream("stats.tsv"), StandardCharsets.UTF_8),
 				false)) {
@@ -1226,6 +1232,16 @@ class Core {
 		}
 	}
 
+	// 2000-01-01 の時刻にする
+	static Date normalizedDate(Date d) {
+		Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+		c.setTime(d);
+		c.set(Calendar.YEAR, 2000);
+		c.set(Calendar.MONTH, 0);
+		c.set(Calendar.DAY_OF_MONTH, 1);
+		return c.getTime();
+	}
+
 	public static void addMatch(Match m) {
 		currentMatch = m;
 		synchronized (listLock) {
@@ -1234,8 +1250,19 @@ class Core {
 			if (i >= 0) {
 				matches.remove(i);
 				matches.add(i, m);
-			} else
+			} else {
+				// 日付が異なり時刻が一致するマッチがあった場合日付認識ミスの重複なので古い方を不参加マークにする。
+				Date normalizedDate = normalizedDate(m.start);
+				for (Match o : matches) {
+					if (normalizedDate.equals(normalizedDate(o.start))) {
+						for (Round r : o.rounds)
+							rounds.remove(r);
+						matches.remove(o);
+						break;
+					}
+				}
 				matches.add(m);
+			}
 			// 直前のマッチのラウンド０だったら除去
 			if (matches.size() > 2 && matches.get(matches.size() - 2).rounds.size() == 0)
 				matches.remove(matches.size() - 2);
@@ -1335,7 +1362,7 @@ class Core {
 					a.update(dayKey);
 					stat.todayDailyPoint += a.currentValue;
 				}
-				 */
+				*/
 			}
 		});
 	}
@@ -1417,7 +1444,6 @@ class FGReader extends TailerListenerAdapter {
 	int qualifiedCount = 0;
 	int eliminatedCount = 0;
 	boolean isFinal = false;
-	long prevNetworkCheckedTime = System.currentTimeMillis();
 
 	Timer survivalScoreTimer;
 
@@ -1432,7 +1458,7 @@ class FGReader extends TailerListenerAdapter {
 	}
 
 	static Pattern patternDateDetect = Pattern
-			.compile("(\\d\\d\\d\\d-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d).\\d\\d\\d LogEOS ");
+			.compile("(\\d\\d\\d\\d-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d)[^ ]+ LogEOS\\(Info\\)");
 	static Pattern patternLaunch = Pattern
 			.compile("\\[FGClient.GlobalInitialisation\\] Active Scene is 'Init'");
 	static Pattern patternServer = Pattern
@@ -1477,7 +1503,7 @@ class FGReader extends TailerListenerAdapter {
 			parsed.setTime(f.parse(line.substring(0, 12)));
 			c.set(Calendar.YEAR, Core.currentYear);
 			c.set(Calendar.MONTH, Core.currentMonth);
-			c.set(Calendar.DAY_OF_MONTH, Core.currentDate);
+			c.set(Calendar.DAY_OF_MONTH, Core.currentUTCDate);
 			c.set(Calendar.HOUR_OF_DAY, parsed.get(Calendar.HOUR_OF_DAY));
 			c.set(Calendar.MINUTE, parsed.get(Calendar.MINUTE));
 			c.set(Calendar.SECOND, parsed.get(Calendar.SECOND));
@@ -1499,11 +1525,11 @@ class FGReader extends TailerListenerAdapter {
 		m = patternDateDetect.matcher(line);
 		if (m.find()) {
 			try {
-				Calendar c = Calendar.getInstance(); // local timezone
+				Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
 				c.setTime(date8601Local.parse(m.group(1)));
 				Core.currentYear = c.get(Calendar.YEAR);
 				Core.currentMonth = c.get(Calendar.MONTH);
-				Core.currentDate = c.get(Calendar.DAY_OF_MONTH);
+				Core.currentUTCDate = c.get(Calendar.DAY_OF_MONTH);
 			} catch (ParseException e) {
 				//e.printStackTrace();
 			}
@@ -1524,34 +1550,30 @@ class FGReader extends TailerListenerAdapter {
 			System.out.println("DETECT SHOW STARTING");
 			readState = ReadState.ROUND_DETECTING;
 
-			if (!ip.equals(Core.currentServerIp)) {
-				System.out.println("new server detected: " + ip);
-				long now = System.currentTimeMillis();
-				if (match.pingMS == 0 || prevNetworkCheckedTime + 60 * 1000 < now) {
-					Core.currentServerIp = ip;
-					// ping check
-					try {
-						InetAddress address = InetAddress.getByName(ip);
-						boolean res = address.isReachable(3000);
-						match.pingMS = System.currentTimeMillis() - now;
-						System.out.println("PING " + res + " " + match.pingMS);
-						Map<String, String> server = Core.servers.get(ip);
-						if (server == null) {
-							ObjectMapper mapper = new ObjectMapper();
-							JsonNode root = mapper.readTree(new URL("http://ip-api.com/json/" + ip));
-							server = new HashMap<String, String>();
-							server.put("country", root.get("country").asText());
-							server.put("regionName", root.get("regionName").asText());
-							server.put("city", root.get("city").asText());
-							server.put("timezone", root.get("timezone").asText());
-							Core.servers.put(ip, server);
-						}
-						System.err.println(ip + " " + match.pingMS + " " + server.get("timezone") + " "
-								+ server.get("city"));
-					} catch (IOException e) {
-						e.printStackTrace();
+			if (match.pingMS == 0) {
+				Core.currentServerIp = ip;
+				// ping check
+				try {
+					InetAddress address = InetAddress.getByName(ip);
+					long now = System.currentTimeMillis();
+					boolean res = address.isReachable(3000);
+					match.pingMS = System.currentTimeMillis() - now;
+					System.out.println("PING " + res + " " + match.pingMS);
+					Map<String, String> server = Core.servers.get(ip);
+					if (server == null) {
+						ObjectMapper mapper = new ObjectMapper();
+						JsonNode root = mapper.readTree(new URL("http://ip-api.com/json/" + ip));
+						server = new HashMap<String, String>();
+						server.put("country", root.get("country").asText());
+						server.put("regionName", root.get("regionName").asText());
+						server.put("city", root.get("city").asText());
+						server.put("timezone", root.get("timezone").asText());
+						Core.servers.put(ip, server);
 					}
-					prevNetworkCheckedTime = System.currentTimeMillis();
+					System.err.println(ip + " " + match.pingMS + " " + server.get("timezone") + " "
+							+ server.get("city"));
+				} catch (IOException e) {
+					e.printStackTrace();
 				}
 			}
 			listener.showUpdated();
@@ -1930,9 +1952,13 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		frame.setVisible(true);
 		Core.started = true;
+		// ad-hoc show initial stats
+		// ラウンド終了検出で更新されるがそれだけだと起動時ログがないときの初期表示がされないのでとりあえず
 		Core.updateStats();
 		Core.updateAchivements();
 		frame.updateRounds();
+		frame.displayStats();
+		frame.achievementPanel.updateDaily();
 
 		reader.start();
 	}
@@ -1978,7 +2004,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.1");
+		label = new JLabel("v0.3.3");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2348,7 +2374,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
 
 		int p = stat.totalPoint();
-		appendToStats("Total Points: " + stat.totalPoint(), "bold");
+		appendToStats("Total Points: " + p, "bold");
 		/*
 		appendToStats("[" + stat.getTitle() + "]", "bold");
 
@@ -2430,14 +2456,17 @@ class AchievementPanel extends JPanel {
 
 	void updateDaily() {
 		dailyBox.removeAll();
-		JLabel l = new JLabel("Daily Challenges", SwingConstants.LEFT);
+		int today = Core.toDayKey(new Date());
+		JLabel l = new JLabel("Daily Challenges " + (today / 100 % 100 + 1) + "/" + (today % 100), SwingConstants.LEFT);
 		l.setFont(FONT);
 		dailyBox.add(l);
-		for (Achievement a : Core.getChallenges(Core.toDayKey(new Date()))) {
+		for (Achievement a : Core.getChallenges(today)) {
 			dailyBox.add(a.panel);
 			a.panel.setBackground(BACKGROUND);
 			a.panel.setPreferredSize(new Dimension(80, 40));
 		}
+		revalidate();
+		repaint();
 	}
 }
 
