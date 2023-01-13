@@ -231,6 +231,10 @@ class Round implements Comparable<Round> {
 		return dayKey == Core.toDayKey(start);
 	}
 
+	public boolean isWeek(int weekKey) {
+		return weekKey == Core.toWeekKey(start);
+	}
+
 	public boolean isFallBall() {
 		return fixed && "FallGuy_FallBall_5".equals(name);
 	}
@@ -369,7 +373,7 @@ class Round implements Comparable<Round> {
 			buf.append(" ").append(getTeamScore(p.teamId)).append(":")
 					.append(getTeamScore(1 - p.teamId));
 		if (myFinish != null)
-			buf.append(" ").append((double) getTime(myFinish) / 1000).append("s");
+			buf.append(" ").append(String.format("%.3f", (double) getTime(myFinish) / 1000)).append("s");
 		buf.append(" ").append(match.ip);
 		buf.append(" ").append(match.pingMS).append("ms");
 		if (disableMe)
@@ -688,8 +692,8 @@ abstract class Achievement {
 		panel.add(progressLabel, BorderLayout.EAST);
 	}
 
-	public void update(int dayKey) {
-		calcCurrentValue(dayKey);
+	public void update(int dayKey, int weekKey) {
+		calcCurrentValue(dayKey, weekKey);
 		myPoint = 0;
 		for (int i = 0; i < threasholds.length; i += 1)
 			if (currentValue >= threasholds[i])
@@ -714,7 +718,7 @@ abstract class Achievement {
 		panel.setToolTipText(new String(buf));
 	}
 
-	public abstract void calcCurrentValue(int dayKey);
+	public abstract void calcCurrentValue(int dayKey, int weekKey);
 
 	public abstract String getName();
 
@@ -731,9 +735,10 @@ class RoundCountAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue(int dayKey) {
+	public void calcCurrentValue(int dayKey, int weekKey) {
 		currentValue = Core.filter(
-				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey)))
+				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey))
+						&& (weekKey == 0 || r.isWeek(weekKey)))
 				.size();
 	}
 
@@ -757,7 +762,7 @@ class WinCountAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue(int dayKey) {
+	public void calcCurrentValue(int dayKey, int weekKey) {
 		currentValue = Core
 				.filter(r -> {
 					if (playerCount > 8 && r.getSubstanceQualifiedCount() < playerCount)
@@ -773,7 +778,7 @@ class WinCountAchievement extends Achievement {
 					}
 					return r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isQualified()
 							&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000))
-							&& (dayKey == 0 || r.isDate(dayKey));
+							&& (dayKey == 0 || r.isDate(dayKey) && (weekKey == 0 || r.isWeek(weekKey)));
 				})
 				.size();
 	}
@@ -796,7 +801,7 @@ class StreakAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue(int dayKey) {
+	public void calcCurrentValue(int dayKey, int weekKey) {
 		currentValue = 0;
 		int streak = 0;
 		for (Round r : Core.filter(
@@ -829,7 +834,7 @@ class RateAchievement extends Achievement {
 	}
 
 	@Override
-	public void calcCurrentValue(int dayKey) {
+	public void calcCurrentValue(int dayKey, int weekKey) {
 		currentValue = 0;
 		int winCount = 0;
 		List<Round> filtered = Core.filter(r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled());
@@ -1007,6 +1012,12 @@ class Core {
 		return c.get(Calendar.YEAR) * 10000 + c.get(Calendar.MONTH) * 100 + c.get(Calendar.DAY_OF_MONTH);
 	}
 
+	public static int toWeekKey(Date date) {
+		Calendar c = Calendar.getInstance();
+		c.setTime(date);
+		return c.get(Calendar.YEAR) * 100 + c.get(Calendar.WEEK_OF_YEAR);
+	}
+
 	/*
 	static String dump(byte[] bytes) {
 		StringBuilder b = new StringBuilder();
@@ -1034,6 +1045,7 @@ class Core {
 	public static final PlayerStat stat = new PlayerStat();
 	public static final List<Achievement> achievements = new ArrayList<>();
 	public static final List<Achievement> dailyChallenges = new ArrayList<>();
+	public static final List<Achievement> weeklyChallenges = new ArrayList<>();
 
 	static final SimpleDateFormat datef = new SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN);
 	static final DateFormat f = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");
@@ -1107,6 +1119,9 @@ class Core {
 		dailyChallenges.add(new WinCountAchievement(new int[] { 1 }, new int[] { 2 }, false, 0, 3));
 		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 1 }, 2));
 		dailyChallenges.add(new StreakAchievement(new int[] { 1 }, new int[] { 2 }, 3));
+
+		weeklyChallenges.add(new RoundCountAchievement(new int[] { 100 }, new int[] { 5 }));
+		weeklyChallenges.add(new WinCountAchievement(new int[] { 75 }, new int[] { 10 }, false, 0, 0));
 	}
 	static final int[] titledPoints = new int[] { 100, 1000, 3000, 7000, 10000 };
 
@@ -1340,18 +1355,27 @@ class Core {
 			synchronized (Core.listLock) {
 				stat.totalAchievementPoint = 0;
 				for (Achievement a : achievements) {
-					a.update(0);
+					a.update(0, 0);
 					stat.totalAchievementPoint += a.myPoint;
 				}
 
 				stat.totalDailyPoint = 0;
+				int currentWeekKey = 0;
 				int currentDayKey = 0;
 				for (Round r : Core.rounds) {
 					int dayKey = Core.toDayKey(r.start);
+					int weekKey = Core.toWeekKey(r.start);
 					if (currentDayKey == 0 || currentDayKey != dayKey) {
 						currentDayKey = dayKey;
 						for (Achievement a : Core.getChallenges(dayKey)) {
-							a.update(dayKey);
+							a.update(dayKey, 0);
+							stat.totalDailyPoint += a.myPoint;
+						}
+					}
+					if (currentWeekKey == 0 || currentWeekKey != weekKey) {
+						currentWeekKey = weekKey;
+						for (Achievement a : Core.weeklyChallenges) {
+							a.update(0, weekKey);
 							stat.totalDailyPoint += a.myPoint;
 						}
 					}
@@ -2004,7 +2028,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.3");
+		label = new JLabel("v0.3.4");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2453,16 +2477,26 @@ class AchievementPanel extends JPanel {
 	}
 
 	static final Color BACKGROUND = new Color(0xffffcc);
+	static final Color BACKGROUND_WEEK = new Color(0xffffee);
 
 	void updateDaily() {
 		dailyBox.removeAll();
 		int today = Core.toDayKey(new Date());
-		JLabel l = new JLabel("Daily Challenges " + (today / 100 % 100 + 1) + "/" + (today % 100), SwingConstants.LEFT);
+		int week = Core.toWeekKey(new Date());
+		JLabel l = new JLabel("Daily Challenges " + (today / 100 % 100 + 1) + "/" + (today % 100));
 		l.setFont(FONT);
 		dailyBox.add(l);
 		for (Achievement a : Core.getChallenges(today)) {
 			dailyBox.add(a.panel);
 			a.panel.setBackground(BACKGROUND);
+			a.panel.setPreferredSize(new Dimension(80, 40));
+		}
+		l = new JLabel("Weekly Challenges " + (week / 100) + "/" + (week % 100 + 1));
+		l.setFont(FONT);
+		dailyBox.add(l);
+		for (Achievement a : Core.weeklyChallenges) {
+			dailyBox.add(a.panel);
+			a.panel.setBackground(BACKGROUND_WEEK);
 			a.panel.setPreferredSize(new Dimension(80, 40));
 		}
 		revalidate();
