@@ -737,7 +737,8 @@ class RoundCountAchievement extends Achievement {
 	@Override
 	public void calcCurrentValue(int dayKey, int weekKey) {
 		currentValue = Core.filter(
-				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && (dayKey == 0 || r.isDate(dayKey))
+				r -> r.isFallBall() && r.isCustomFallBall() && r.isEnabled()
+						&& (dayKey == 0 || r.isDate(dayKey))
 						&& (weekKey == 0 || r.isWeek(weekKey)))
 				.size();
 	}
@@ -778,7 +779,8 @@ class WinCountAchievement extends Achievement {
 					}
 					return r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isQualified()
 							&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000))
-							&& (dayKey == 0 || r.isDate(dayKey) && (weekKey == 0 || r.isWeek(weekKey)));
+							&& (dayKey == 0 || r.isDate(dayKey))
+							&& (weekKey == 0 || r.isWeek(weekKey));
 				})
 				.size();
 	}
@@ -2028,7 +2030,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.4");
+		label = new JLabel("v0.3.5");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2105,6 +2107,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		filterSel.addItem(new PlayerCountRoundFilter(8));
 		filterSel.addItem(new FewAllyCustomRoundFilter());
 		filterSel.addItem(new ManyAllyCustomRoundFilter());
+		Core.filter = (RoundFilter) filterSel.getSelectedItem();
 		filterSel.addItemListener(ev -> {
 			Core.filter = (RoundFilter) filterSel.getSelectedItem();
 			Core.updateStats();
@@ -2123,6 +2126,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		limitSel.addItem(50);
 		limitSel.addItem(100);
 		limitSel.addItem(500);
+		Core.limit = 100;
 		limitSel.setSelectedItem(100);
 		limitSel.addItemListener(ev -> {
 			Core.limit = (int) limitSel.getSelectedItem();
