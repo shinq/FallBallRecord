@@ -2495,7 +2495,7 @@ class AchievementPanel extends JPanel {
 			a.panel.setBackground(BACKGROUND);
 			a.panel.setPreferredSize(new Dimension(80, 40));
 		}
-		l = new JLabel("Weekly Challenges " + (week / 100) + "/" + (week % 100 + 1));
+		l = new JLabel("Weekly Challenges " + (week / 100) + "/" + (week % 100));
 		l.setFont(FONT);
 		dailyBox.add(l);
 		for (Achievement a : Core.weeklyChallenges) {
