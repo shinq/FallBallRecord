@@ -30,6 +30,7 @@ import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -1160,7 +1161,7 @@ class Core {
 
 				if ("M".equals(d[0])) {
 					Date matchStart = f.parse(d[2]);
-					boolean isCustom = d.length > 7 && "true".equals(d[7]);
+					boolean isCustom = d.length < 8 || "true".equals(d[7]);
 					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4], isCustom);
 					m.pingMS = Integer.parseInt(d[5]);
 					m.winStreak = Integer.parseInt(d[6]);
@@ -1197,8 +1198,9 @@ class Core {
 
 	public static void save() {
 		try {
-			Files.copy(Paths.get("stats.tsv"), Paths.get("stats_prev.tsv"));
+			Files.copy(Paths.get("stats.tsv"), Paths.get("stats_prev.tsv"), StandardCopyOption.REPLACE_EXISTING);
 		} catch (IOException e) {
+			e.printStackTrace();
 		}
 		try (PrintWriter out = new PrintWriter(
 				new OutputStreamWriter(new FileOutputStream("stats.tsv"), StandardCharsets.UTF_8),
