@@ -44,7 +44,6 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Locale;
 import java.util.Map;
-import java.util.MissingResourceException;
 import java.util.Properties;
 import java.util.PropertyResourceBundle;
 import java.util.Random;
@@ -213,6 +212,8 @@ class Round implements Comparable<Round> {
 	}
 
 	public boolean isSquad() {
+		if (match.isSquad())
+			return true;
 		return byId.size() > 0 && byId.values().iterator().next().squadId != 0;
 	}
 
@@ -240,7 +241,7 @@ class Round implements Comparable<Round> {
 	}
 
 	public boolean isCustomFallBall() {
-		return isFallBall() && "event_only_fall_ball_template".equals(match.name);
+		return isFallBall() && "event_only_fall_ball_template".equals(match.name) && match.isCustom;
 	}
 
 	// デフォルトで20以下奇数時は -1 補正する。
@@ -395,16 +396,18 @@ class Match {
 	final Date start; // id として使用
 	final String ip;
 	long pingMS;
+	boolean isCustom;
 	boolean fixed; // 完了まで読み込み済み
 	Date end;
 	int winStreak;
 	List<Round> rounds = new ArrayList<Round>();
 
-	public Match(long session, String name, Date start, String ip) {
+	public Match(long session, String name, Date start, String ip, boolean isCustom) {
 		this.session = session;
 		this.name = name;
 		this.start = start;
 		this.ip = ip;
+		this.isCustom = isCustom;
 	}
 
 	public void addRound(Round r) {
@@ -434,6 +437,10 @@ class Match {
 
 	public boolean isCurrentSession() {
 		return session == Core.currentSession;
+	}
+
+	public boolean isSquad() {
+		return name.contains("squad");
 	}
 
 	public boolean isDate(int dayKey) {
@@ -491,14 +498,7 @@ class RoundDef {
 	}
 
 	public String getName() {
-		try {
-			String name = Core.RES.getString(key);
-			if (name == null)
-				return key;
-			return name;
-		} catch (MissingResourceException w) {
-			return key;
-		}
+		return Core.getRes(key);
 	}
 
 	public boolean isHuntRace() {
@@ -875,7 +875,7 @@ class AllRoundFilter implements RoundFilter {
 
 	@Override
 	public String toString() {
-		return "ALL";
+		return Core.getRes("ALL");
 	}
 }
 
@@ -887,7 +887,7 @@ class CurrentSessionRoundFilter implements RoundFilter {
 
 	@Override
 	public String toString() {
-		return "CurrentSesionOnly";
+		return Core.getRes("CurrentSesionOnly");
 	}
 }
 
@@ -899,19 +899,31 @@ class CustomRoundFilter implements RoundFilter {
 
 	@Override
 	public String toString() {
-		return "CustomOnly";
+		return Core.getRes("CustomOnly");
 	}
 }
 
-class NotCustomRoundFilter implements RoundFilter {
+class SquadRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && !r.isCustomFallBall();
+		return r.isFallBall() && r.getMe() != null && r.isSquad();
 	}
 
 	@Override
 	public String toString() {
-		return "Not CustomOnly";
+		return Core.getRes("SquadOnly");
+	}
+}
+
+class SubShowRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		return r.isFallBall() && r.getMe() != null && !r.isCustomFallBall() && !r.isSquad();
+	}
+
+	@Override
+	public String toString() {
+		return Core.getRes("SubShowOnly");
 	}
 }
 
@@ -928,7 +940,7 @@ class FewAllyCustomRoundFilter implements RoundFilter {
 
 	@Override
 	public String toString() {
-		return "Few ally(Custom)";
+		return Core.getRes("Few ally(Custom)");
 	}
 }
 
@@ -945,7 +957,7 @@ class ManyAllyCustomRoundFilter implements RoundFilter {
 
 	@Override
 	public String toString() {
-		return "Many ally(Custom)";
+		return Core.getRes("Many ally(Custom)");
 	}
 }
 
@@ -987,6 +999,14 @@ class Core {
 		rate = rate.multiply(new BigDecimal("100"));
 		rate = rate.setScale(2, RoundingMode.DOWN);
 		return rate.doubleValue();
+	}
+
+	public static String getRes(String key) {
+		try {
+			return RES.getString(key);
+		} catch (Exception e) {
+			return key;
+		}
 	}
 
 	public static String pad(int v) {
@@ -1135,12 +1155,13 @@ class Core {
 			Match m = null;
 			while ((line = in.readLine()) != null) {
 				String[] d = line.split("\t");
-				if (d.length < 6)
+				if (d.length < 7)
 					continue;
 
 				if ("M".equals(d[0])) {
 					Date matchStart = f.parse(d[2]);
-					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4]);
+					boolean isCustom = d.length > 7 && "true".equals(d[7]);
+					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4], isCustom);
 					m.pingMS = Integer.parseInt(d[5]);
 					m.winStreak = Integer.parseInt(d[6]);
 					addMatch(m);
@@ -1208,6 +1229,8 @@ class Core {
 					out.print(currentMatch.pingMS); // 5
 					out.print("\t");
 					out.print(currentMatch.winStreak); // 6
+					out.print("\t");
+					out.print(currentMatch.isCustom); // 7
 					out.println();
 				}
 				out.print("r"); // 0
@@ -1465,6 +1488,7 @@ class FGReader extends TailerListenerAdapter {
 	}
 
 	ReadState readState = ReadState.SHOW_DETECTING;
+	boolean isCustomShow = false;
 	int myObjectId = 0;
 	int topObjectId = 0;
 	int qualifiedCount = 0;
@@ -1489,6 +1513,11 @@ class FGReader extends TailerListenerAdapter {
 			.compile("\\[FGClient.GlobalInitialisation\\] Active Scene is 'Init'");
 	static Pattern patternServer = Pattern
 			.compile("\\[StateConnectToGame\\] We're connected to the server! Host = ([^:]+)");
+
+	static Pattern patternShowStartNormalShow = Pattern
+			.compile("\\[GameStateMachine\\] Replacing FGClient.StateMatchmaking with FGClient.StateConnectToGame");
+	static Pattern patternShowStartCustomShow = Pattern
+			.compile("\\[GameStateMachine\\] Replacing FGClient.StatePrivateLobby with FGClient.StateConnectToGame");
 
 	static Pattern patternShowName = Pattern.compile("\\[HandleSuccessfulLogin\\] Selected show is ([^\\s]+)");
 	//	static Pattern patternShow = Pattern
@@ -1571,9 +1600,9 @@ class FGReader extends TailerListenerAdapter {
 		if (m.find()) {
 			String showName = "_";
 			String ip = m.group(1);
-			Match match = new Match(Core.currentSession, showName, getTime(line), ip);
+			Match match = new Match(Core.currentSession, showName, getTime(line), ip, isCustomShow);
 			Core.addMatch(match);
-			System.out.println("DETECT SHOW STARTING");
+			System.out.println("DETECT SHOW STARTING " + showName);
 			readState = ReadState.ROUND_DETECTING;
 
 			if (match.pingMS == 0) {
@@ -1612,10 +1641,21 @@ class FGReader extends TailerListenerAdapter {
 		switch (readState) {
 		case SHOW_DETECTING: // start show or round detection
 		case ROUND_DETECTING: // start round detection
+			m = patternShowStartNormalShow.matcher(line);
+			if (m.find()) {
+				isCustomShow = false;
+				return;
+			}
+			m = patternShowStartCustomShow.matcher(line);
+			if (m.find()) {
+				isCustomShow = true;
+				return;
+			}
 			m = patternShowName.matcher(line);
 			if (m.find()) {
 				String showName = m.group(1);
 				Core.currentMatch.name = showName;
+				System.out.println("SHOW NAME UPDATED: " + showName);
 				listener.showUpdated();
 				return;
 			}
@@ -2006,7 +2046,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		Container p = getContentPane();
 		p.setLayout(l);
 
-		JLabel label = new JLabel(Core.RES.getString("rankingLabel"));
+		JLabel label = new JLabel(Core.getRes("rankingLabel"));
 		label.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE + 2));
 		l.putConstraint(SpringLayout.WEST, label, COL1_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
@@ -2017,20 +2057,20 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		final int COL2_X = COL1_X + FONT_SIZE_RANK * 18 + 10;
 		final int COL3_X = COL2_X + 340;
 
-		label = new JLabel(Core.RES.getString("matchList"));
+		label = new JLabel(Core.getRes("matchList"));
 		label.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE + 2));
 		l.putConstraint(SpringLayout.WEST, label, COL2_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
 		label.setSize(100, 20);
 		p.add(label);
-		label = new JLabel(Core.RES.getString("roundList"));
+		label = new JLabel(Core.getRes("roundList"));
 		label.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE + 2));
 		l.putConstraint(SpringLayout.WEST, label, COL3_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, label, LINE1_Y, SpringLayout.NORTH, p);
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.5");
+		label = new JLabel("v0.3.6");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2099,7 +2139,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		filterSel.addItem(new AllRoundFilter());
 		filterSel.addItem(new CurrentSessionRoundFilter());
 		filterSel.addItem(new CustomRoundFilter());
-		filterSel.addItem(new NotCustomRoundFilter());
+		filterSel.addItem(new SubShowRoundFilter());
+		filterSel.addItem(new SquadRoundFilter());
 		filterSel.addItem(new PlayerCountRoundFilter(4));
 		filterSel.addItem(new PlayerCountRoundFilter(5));
 		filterSel.addItem(new PlayerCountRoundFilter(6));
@@ -2134,7 +2175,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			updateRounds();
 		});
 		p.add(limitSel);
-		label = new JLabel(Core.RES.getString("moreThanOneMatch"));
+		label = new JLabel(Core.getRes("moreThanOneMatch"));
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.WEST, label, 6, SpringLayout.EAST, limitSel);
 		l.putConstraint(SpringLayout.NORTH, label, 2, SpringLayout.NORTH, limitSel);
@@ -2176,7 +2217,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.SOUTH, scroller, -60, SpringLayout.SOUTH, p);
 		*/
 
-		JButton removeMemberFromRoundButton = new JButton(Core.RES.getString("removeMemberFromRoundButton"));
+		JButton removeMemberFromRoundButton = new JButton(Core.getRes("removeMemberFromRoundButton"));
 		removeMemberFromRoundButton.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.WEST, removeMemberFromRoundButton, 0, SpringLayout.WEST, scroller);
 		l.putConstraint(SpringLayout.NORTH, removeMemberFromRoundButton, 10, SpringLayout.SOUTH, scroller);
@@ -2184,7 +2225,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		removeMemberFromRoundButton.addActionListener(ev -> removePlayerOnCurrentRound());
 		p.add(removeMemberFromRoundButton);
 
-		JButton adjustPlayerCountButton = new JButton(Core.RES.getString("adjustPlayerCountButton"));
+		JButton adjustPlayerCountButton = new JButton(Core.getRes("adjustPlayerCountButton"));
 		adjustPlayerCountButton.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.WEST, adjustPlayerCountButton, 10, SpringLayout.EAST, removeMemberFromRoundButton);
 		l.putConstraint(SpringLayout.NORTH, adjustPlayerCountButton, 10, SpringLayout.SOUTH, scroller);
@@ -2260,7 +2301,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 					model.addElement(r);
 				}
 			}
-			//roundsSel.setSelectedIndex(0);
+			roundsSel.setSelectedIndex(0);
 			//roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
 			displayStats();
 		}
@@ -2396,7 +2437,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		statsArea.setText("");
 
 		PlayerStat stat = Core.stat;
-		appendToStats(Core.RES.getString("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
+		appendToStats(Core.getRes("myStatLabel") + stat.winCount + " / " + stat.participationCount + " ("
 				+ stat.getRate() + "%)", "bold");
 		appendToStats("Total rate: " + stat.totalWinCount + " / " + stat.totalParticipationCount + " ("
 				+ Core.calRate(stat.totalWinCount, stat.totalParticipationCount) + "%)", "bold");
