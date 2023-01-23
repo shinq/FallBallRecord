@@ -238,7 +238,7 @@ class Round implements Comparable<Round> {
 	}
 
 	public boolean isFallBall() {
-		return fixed && "FallGuy_FallBall_5".equals(name);
+		return "FallGuy_FallBall_5".equals(name);
 	}
 
 	public boolean isCustomFallBall() {
@@ -363,19 +363,27 @@ class Round implements Comparable<Round> {
 		buf.append(Core.datef.format(start));
 		if (p != null) {
 			buf.append(" ").append(p.isQualified() ? "○" : "☓");
-			if (p.isQualified())
-				buf.append(Core.pad(getSubstanceQualifiedCount())).append("vs")
-						.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount()));
-			else
-				buf.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount())).append("vs")
-						.append(Core.pad(getSubstanceQualifiedCount()));
+			if (!fixed) {
+				if (teamScore != null)
+					p.teamId = teamScore[0] >= teamScore[1] ? 1 : 0;
+				buf.append(Core.pad(getSubstancePlayerCount())).append("_unknown");
+			} else {
+				if (p.isQualified())
+					buf.append(Core.pad(getSubstanceQualifiedCount())).append("vs")
+							.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount()));
+				else
+					buf.append(Core.pad(getSubstancePlayerCount() - getSubstanceQualifiedCount())).append("vs")
+							.append(Core.pad(getSubstanceQualifiedCount()));
+				buf.append("(").append(Core.pad(playerCountAdd)).append(")");
+			}
 		}
-		buf.append("(").append(Core.pad(playerCountAdd)).append(")");
 		if (p != null)
 			buf.append(" ").append(getTeamScore(p.teamId)).append(":")
 					.append(getTeamScore(1 - p.teamId));
 		if (myFinish != null)
 			buf.append(" ").append(String.format("%.3f", (double) getTime(myFinish) / 1000)).append("s");
+		else
+			buf.append("         ");
 		buf.append(" ").append(match.ip);
 		buf.append(" ").append(match.pingMS).append("ms");
 		if (disableMe)
@@ -2072,7 +2080,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.6");
+		label = new JLabel("v0.3.7");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2259,12 +2267,14 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 				for (String city : connected.keySet()) {
 					System.err.println(city + "\t" + connected.get(city));
 				}
+				/*
 				for (Match m : Core.matches) {
 					System.err.println("****** " + m.name);
 					for (Round r : m.rounds) {
 						System.err.println(r.name + "\t" + r.roundName2);
 					}
 				}
+				*/
 			}
 		});
 	}
