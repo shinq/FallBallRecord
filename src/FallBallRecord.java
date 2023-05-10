@@ -56,9 +56,9 @@ import java.util.TimerTask;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.swing.AbstractListModel;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
-import javax.swing.DefaultListModel;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -132,6 +132,7 @@ class Player {
 	int teamId;
 	int ranking; // rank of current round
 
+	Date finish; // goal or eliminated time
 	Boolean qualified;
 	int score; // ラウンド中のスコアあるいは順位スコア
 	int finalScore = -1; // ラウンド終了後に出力されたスコア
@@ -160,7 +161,6 @@ class Round implements Comparable<Round> {
 	Date start;
 	Date end;
 	Date topFinish;
-	Date myFinish;
 	int myPlayerId;
 	int[] teamScore;
 	int playerCount;
@@ -255,7 +255,8 @@ class Round implements Comparable<Round> {
 	}
 
 	public int getSubstanceQualifiedCount() {
-		return qualifiedCount * 2 > playerCount ? qualifiedCount + playerCountAdd : qualifiedCount;
+		return (qualifiedCount + (isEnabled() ? 0 : -1)) * 2 > playerCount ? qualifiedCount + playerCountAdd
+				: qualifiedCount;
 	}
 
 	// 自分がクリアしたかどうか
@@ -270,6 +271,8 @@ class Round implements Comparable<Round> {
 
 	// myFinish や end を渡して ms 取得
 	public long getTime(Date o) {
+		if (start == null)
+			return 0;
 		long t = o.getTime() - start.getTime();
 		if (t < 0)
 			t += 24 * 60 * 60 * 1000;
@@ -380,8 +383,8 @@ class Round implements Comparable<Round> {
 		if (p != null)
 			buf.append(" ").append(getTeamScore(p.teamId)).append(":")
 					.append(getTeamScore(1 - p.teamId));
-		if (myFinish != null)
-			buf.append(" ").append(String.format("%.3f", (double) getTime(myFinish) / 1000)).append("s");
+		if (getMe().finish != null)
+			buf.append(" ").append(String.format("%.3f", (double) getTime(getMe().finish) / 1000)).append("s");
 		else
 			buf.append("         ");
 		buf.append(" ").append(match.ip);
@@ -787,7 +790,7 @@ class WinCountAchievement extends Achievement {
 							return false;
 					}
 					return r.isFallBall() && r.isCustomFallBall() && r.isEnabled() && r.isQualified()
-							&& (!overtimeOnly || (r.myFinish != null && r.getTime(r.myFinish) > 121000))
+							&& (!overtimeOnly || (r.getMe().finish != null && r.getTime(r.getMe().finish) > 121000))
 							&& (dayKey == 0 || r.isDate(dayKey))
 							&& (weekKey == 0 || r.isWeek(weekKey));
 				})
@@ -915,7 +918,7 @@ class CustomRoundFilter implements RoundFilter {
 class SquadRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && r.isSquad();
+		return r.isFallBall() && r.getMe() != null && r.isSquad() && r.getMe().partyId == 0;
 	}
 
 	@Override
@@ -927,12 +930,24 @@ class SquadRoundFilter implements RoundFilter {
 class SubShowRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && !r.isCustomFallBall() && !r.isSquad();
+		return r.isFallBall() && r.getMe() != null && !r.isCustomFallBall() && !r.isSquad() && r.getMe().partyId == 0;
 	}
 
 	@Override
 	public String toString() {
 		return Core.getRes("SubShowOnly");
+	}
+}
+
+class PartyRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		return r.isFallBall() && r.getMe() != null && r.getMe().partyId != 0;
+	}
+
+	@Override
+	public String toString() {
+		return Core.getRes("PartyOnly");
 	}
 }
 
@@ -1184,10 +1199,12 @@ class Core {
 
 				r.playerCount = Integer.parseInt(d[6]);
 				r.qualifiedCount = Integer.parseInt(d[7]);
-				if (d[8].length() > 0)
-					r.myFinish = r.end = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
+				if (r.qualifiedCount == 0)
+					r.fixed = false;
 				Player p = new Player(0);
 				p.name = "YOU";
+				if (d[8].length() > 0)
+					p.finish = r.topFinish = r.end = new Date(r.start.getTime() + Long.parseUnsignedLong(d[8]));
 				p.qualified = "true".equals(d[9]);
 				r.disableMe = "true".equals(d[10]);
 				r.playerCountAdd = Integer.parseInt(d[11]);
@@ -1259,8 +1276,8 @@ class Core {
 				out.print("\t");
 				out.print(r.qualifiedCount); // 7
 				out.print("\t");
-				if (r.myFinish != null)
-					out.print(r.getTime(r.myFinish)); // 8
+				if (r.topFinish != null)
+					out.print(r.getTime(r.topFinish)); // 8
 				else if (r.end != null)
 					out.print(r.getTime(r.end)); // 8
 
@@ -1365,7 +1382,7 @@ class Core {
 		synchronized (listLock) {
 			stat.reset();
 			for (Round r : filter(filter, limit, true)) {
-				if (!r.fixed || !r.isEnabled() || r.getSubstanceQualifiedCount() == 0)
+				if (!r.isEnabled() || r.getSubstanceQualifiedCount() == 0)
 					continue;
 
 				// このラウンドの参加者の結果を反映
@@ -1543,9 +1560,11 @@ class FGReader extends TailerListenerAdapter {
 					"\\[ClientGameManager\\] Handling bootstrap for local player FallGuy \\[(\\d+)\\] \\(FG.Common.MPGNetObject\\), playerID = (\\d+), squadID = (\\d+)");
 	static Pattern patternPlayerObjectId = Pattern.compile(
 			"\\[ClientGameManager\\] Handling bootstrap for [^ ]+ player FallGuy \\[(\\d+)\\].+, playerID = (\\d+)");
-	static Pattern patternPlayerSpawn = Pattern.compile(
+	static Pattern patternPlayerSpawned = Pattern.compile(
 			"\\[CameraDirector\\] Adding Spectator target (.+) \\((.+)\\) with Party ID: (\\d*)  Squad ID: (\\d+) and playerID: (\\d+)");
 	//static Pattern patternPlayerSpawnFinish = Pattern.compile("\\[ClientGameManager\\] Finalising spawn for player FallGuy \\[(\\d+)\\] (.+) \\((.+)\\) ");
+	static Pattern patternPlayerUnspawned = Pattern
+			.compile("\\[ClientGameManager\\] Handling unspawn for player (\\d+)");
 
 	static Pattern patternScoreUpdated = Pattern.compile("Player (\\d+) score = (\\d+)");
 	static Pattern patternTeamScoreUpdated = Pattern.compile("Team (\\d+) score = (\\d+)");
@@ -1708,7 +1727,7 @@ class FGReader extends TailerListenerAdapter {
 				// System.out.println("playerId=" + playerId + " objectId=" + playerObjectId);
 				return;
 			}
-			m = patternPlayerSpawn.matcher(line);
+			m = patternPlayerSpawned.matcher(line);
 			if (m.find()) {
 				String name = m.group(1);
 				String platform = m.group(2);
@@ -1830,15 +1849,18 @@ class FGReader extends TailerListenerAdapter {
 				return;
 			}
 			// finish time handling
-			if (line.contains("[ClientGameManager] Handling unspawn for player FallGuy ")) {
+			m = patternPlayerUnspawned.matcher(line);
+			if (m.find()) {
+				int objectId = Integer.parseUnsignedInt(m.group(1));
+				Player player = r.getByObjectId(objectId);
+				if (player == null)
+					return;
+				player.finish = getTime(line);
 				if (topObjectId == 0) {
-					topObjectId = Integer
-							.parseInt(line.replaceFirst(".+Handling unspawn for player FallGuy \\[(\\d+)\\].*", "$1"));
-					r.topFinish = getTime(line);
+					topObjectId = objectId;
+					r.topFinish = player.finish;
 				}
-				if (line.contains("[ClientGameManager] Handling unspawn for player FallGuy [" + myObjectId + "] ")) {
-					r.myFinish = getTime(line);
-				}
+				listener.roundUpdated();
 				return;
 			}
 
@@ -2080,7 +2102,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.7");
+		label = new JLabel("v0.3.8");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2151,6 +2173,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		filterSel.addItem(new CustomRoundFilter());
 		filterSel.addItem(new SubShowRoundFilter());
 		filterSel.addItem(new SquadRoundFilter());
+		filterSel.addItem(new PartyRoundFilter());
 		filterSel.addItem(new PlayerCountRoundFilter(4));
 		filterSel.addItem(new PlayerCountRoundFilter(5));
 		filterSel.addItem(new PlayerCountRoundFilter(6));
@@ -2200,7 +2223,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.SOUTH, scroller, -30, SpringLayout.SOUTH, p);
 		scroller.setPreferredSize(new Dimension(FONT_SIZE_RANK * 25, 0));
 
-		roundsSel = new JList<Round>(new DefaultListModel<>());
+		roundsSel = new JList<Round>(new FastListModel<>());
 		roundsSel.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
 		p.add(scroller = new JScrollPane(roundsSel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL3_X, SpringLayout.WEST, p);
@@ -2304,15 +2327,16 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	}
 
 	void updateRounds() {
-		DefaultListModel<Round> model = (DefaultListModel<Round>) roundsSel.getModel();
+		FastListModel<Round> model = (FastListModel<Round>) roundsSel.getModel();
 		model.clear();
 		synchronized (Core.listLock) {
 			//for (Round r : Core.rounds) {
 			for (Round r : Core.filtered) {
 				if (r.isFallBall() && r.getMe() != null) {
-					model.addElement(r);
+					model.add(r);
 				}
 			}
+			model.fireAdded();
 			roundsSel.setSelectedIndex(0);
 			//roundsSel.ensureIndexIsVisible(roundsSel.getSelectedIndex());
 			displayStats();
@@ -2672,5 +2696,37 @@ class UTF8Control extends Control {
 			}
 		}
 		return bundle;
+	}
+}
+
+class FastListModel<E> extends AbstractListModel<E> {
+	protected ArrayList<E> delegate = new ArrayList<>();
+
+	public int getSize() {
+		return delegate.size();
+	}
+
+	public E getElementAt(int index) {
+		return delegate.get(index);
+	}
+
+	public int size() {
+		return delegate.size();
+	}
+
+	public void add(E element) {
+		delegate.add(element);
+	}
+
+	public void fireAdded() {
+		fireIntervalAdded(this, 0, size());
+	}
+
+	public void clear() {
+		int index1 = delegate.size() - 1;
+		delegate.clear();
+		if (index1 >= 0) {
+			fireIntervalRemoved(this, 0, index1);
+		}
 	}
 }
