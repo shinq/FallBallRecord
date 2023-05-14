@@ -1564,7 +1564,7 @@ class FGReader extends TailerListenerAdapter {
 			"\\[CameraDirector\\] Adding Spectator target (.+) \\((.+)\\) with Party ID: (\\d*)  Squad ID: (\\d+) and playerID: (\\d+)");
 	//static Pattern patternPlayerSpawnFinish = Pattern.compile("\\[ClientGameManager\\] Finalising spawn for player FallGuy \\[(\\d+)\\] (.+) \\((.+)\\) ");
 	static Pattern patternPlayerUnspawned = Pattern
-			.compile("\\[ClientGameManager\\] Handling unspawn for player (\\d+)");
+			.compile("\\[ClientGameManager\\] Handling unspawn for player (FallGuy \\[)?(\\d+)\\]?");
 
 	static Pattern patternScoreUpdated = Pattern.compile("Player (\\d+) score = (\\d+)");
 	static Pattern patternTeamScoreUpdated = Pattern.compile("Team (\\d+) score = (\\d+)");
@@ -1851,7 +1851,7 @@ class FGReader extends TailerListenerAdapter {
 			// finish time handling
 			m = patternPlayerUnspawned.matcher(line);
 			if (m.find()) {
-				int objectId = Integer.parseUnsignedInt(m.group(1));
+				int objectId = Integer.parseUnsignedInt(m.group(2));
 				Player player = r.getByObjectId(objectId);
 				if (player == null)
 					return;
