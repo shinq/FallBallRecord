@@ -9,11 +9,11 @@ import java.awt.Rectangle;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -27,6 +27,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.URL;
 import java.net.URLConnection;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -53,6 +54,8 @@ import java.util.ResourceBundle.Control;
 import java.util.TimeZone;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -61,6 +64,7 @@ import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -155,6 +159,7 @@ class Round implements Comparable<Round> {
 	final Match match;
 	final String name;
 	boolean isFinal;
+	long seed;
 	String roundName2; // より詳細な内部名
 	boolean fixed; // ステージ完了まで読み込み済み
 	int no; // 0 origin
@@ -170,6 +175,7 @@ class Round implements Comparable<Round> {
 	int qualifiedCount;
 	Map<String, Player> byName = new HashMap<String, Player>();
 	Map<Integer, Player> byId = new HashMap<Integer, Player>();
+	boolean sentResult = false;
 
 	public Round(String name, int no, Date id, boolean isFinal, Match match) {
 		this.name = name;
@@ -1382,7 +1388,7 @@ class Core {
 		synchronized (listLock) {
 			stat.reset();
 			for (Round r : filter(filter, limit, true)) {
-				if (!r.isEnabled() || r.getSubstanceQualifiedCount() == 0)
+				if (!r.isEnabled()/* || r.getSubstanceQualifiedCount() == 0*/)
 					continue;
 
 				// このラウンドの参加者の結果を反映
@@ -1492,6 +1498,8 @@ class FGReader extends TailerListenerAdapter {
 
 	Tailer tailer;
 	Thread thread;
+	ExecutorService backgroundService = Executors.newSingleThreadExecutor();
+	Timer survivalScoreTimer;
 	Listener listener;
 
 	public FGReader(File log, Listener listener) {
@@ -1507,6 +1515,7 @@ class FGReader extends TailerListenerAdapter {
 	public void stop() {
 		tailer.stop();
 		thread.interrupt();
+		backgroundService.shutdown();
 	}
 
 	//////////////////////////////////////////////////////////////////
@@ -1520,9 +1529,8 @@ class FGReader extends TailerListenerAdapter {
 	int topObjectId = 0;
 	int qualifiedCount = 0;
 	int eliminatedCount = 0;
+	long currentSeed = 0;
 	boolean isFinal = false;
-
-	Timer survivalScoreTimer;
 
 	@Override
 	public void handle(String line) {
@@ -1535,7 +1543,7 @@ class FGReader extends TailerListenerAdapter {
 	}
 
 	static Pattern patternDateDetect = Pattern
-			.compile("(\\d\\d\\d\\d-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d)[^ ]+ LogEOS\\(Info\\)");
+			.compile("(\\d\\d\\d\\d-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d)[^ ]* LogEOS \\(Info\\)");
 	static Pattern patternLaunch = Pattern
 			.compile("\\[FGClient.GlobalInitialisation\\] Active Scene is 'Init'");
 	static Pattern patternServer = Pattern
@@ -1550,10 +1558,13 @@ class FGReader extends TailerListenerAdapter {
 	//	static Pattern patternShow = Pattern
 	//			.compile("\\[HandleSuccessfulLogin\\] Selected show is ([^\\s]+)");
 	//static Pattern patternMatchStart = Pattern.compile("\\[StateMatchmaking\\] Begin ");
+
 	static Pattern patternRoundName = Pattern.compile(
 			"\\[StateGameLoading\\] Loading game level scene ([^\\s]+) - frame (\\d+)");
 	static Pattern patternLoadedRound = Pattern
 			.compile("\\[StateGameLoading\\] Finished loading game level, assumed to be ([^.]+)\\.");
+	static Pattern patternRoundSeed = Pattern
+			.compile("\\[GameManager\\] Creating with random seed = ([-\\d]+)");
 
 	static Pattern patternLocalPlayerId = Pattern
 			.compile(
@@ -1599,6 +1610,44 @@ class FGReader extends TailerListenerAdapter {
 		return new Date();
 	}
 
+	static class IPChecker extends TimerTask {
+		final Match match;
+		final Listener listener;
+
+		IPChecker(Match match, Listener listener) {
+			this.match = match;
+			this.listener = listener;
+		}
+
+		@Override
+		public void run() {
+			// ping check
+			try {
+				InetAddress address = InetAddress.getByName(match.ip);
+				long now = System.currentTimeMillis();
+				boolean res = address.isReachable(3000);
+				match.pingMS = System.currentTimeMillis() - now;
+				System.out.println("PING " + res + " " + match.pingMS);
+				Map<String, String> server = Core.servers.get(match.ip);
+				if (server == null) {
+					ObjectMapper mapper = new ObjectMapper();
+					JsonNode root = mapper.readTree(new URL("http://ip-api.com/json/" + match.ip));
+					server = new HashMap<String, String>();
+					server.put("country", root.get("country").asText());
+					server.put("regionName", root.get("regionName").asText());
+					server.put("city", root.get("city").asText());
+					server.put("timezone", root.get("timezone").asText());
+					Core.servers.put(match.ip, server);
+				}
+				listener.showUpdated();
+				System.err.println(match.ip + " " + match.pingMS + " " + server.get("timezone") + " "
+						+ server.get("city"));
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+
 	private void parseLine(String line) {
 		Round r = Core.currentRound;
 		Matcher m = patternLaunch.matcher(line);
@@ -1636,29 +1685,7 @@ class FGReader extends TailerListenerAdapter {
 
 			if (match.pingMS == 0) {
 				Core.currentServerIp = ip;
-				// ping check
-				try {
-					InetAddress address = InetAddress.getByName(ip);
-					long now = System.currentTimeMillis();
-					boolean res = address.isReachable(3000);
-					match.pingMS = System.currentTimeMillis() - now;
-					System.out.println("PING " + res + " " + match.pingMS);
-					Map<String, String> server = Core.servers.get(ip);
-					if (server == null) {
-						ObjectMapper mapper = new ObjectMapper();
-						JsonNode root = mapper.readTree(new URL("http://ip-api.com/json/" + ip));
-						server = new HashMap<String, String>();
-						server.put("country", root.get("country").asText());
-						server.put("regionName", root.get("regionName").asText());
-						server.put("city", root.get("city").asText());
-						server.put("timezone", root.get("timezone").asText());
-						Core.servers.put(ip, server);
-					}
-					System.err.println(ip + " " + match.pingMS + " " + server.get("timezone") + " "
-							+ server.get("city"));
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
+				backgroundService.submit(new IPChecker(match, listener));
 			}
 			listener.showUpdated();
 			return;
@@ -1666,6 +1693,10 @@ class FGReader extends TailerListenerAdapter {
 		m = patternLocalPlayerId.matcher(line);
 		if (m.find()) {
 			r.myPlayerId = Integer.parseUnsignedInt(m.group(2));
+		}
+		m = patternRoundSeed.matcher(line);
+		if (m.find()) {
+			currentSeed = Long.parseLong(m.group(1));
 		}
 		switch (readState) {
 		case SHOW_DETECTING: // start show or round detection
@@ -1699,6 +1730,7 @@ class FGReader extends TailerListenerAdapter {
 				Core.addRound(new Round(roundName, Core.currentMatch.rounds.size(), getTime(line), isFinal,
 						Core.currentMatch));
 				r = Core.currentRound;
+				r.seed = currentSeed;
 				System.out.println("DETECT STARTING " + roundName);
 				//readState = ReadState.MEMBER_DETECTING;
 				return;
@@ -1780,10 +1812,12 @@ class FGReader extends TailerListenerAdapter {
 				return;
 			}
 			*/
+			/*
 			if (line.contains("[StateGameLoading] Starting the game.")) {
 				listener.roundStarted();
 				return;
 			}
+			*/
 			if (line.contains("[GameSession] Changing state from Countdown to Playing")) {
 				// start を書き換える前のエントリを除去
 				synchronized (Core.listLock) {
@@ -1797,6 +1831,8 @@ class FGReader extends TailerListenerAdapter {
 				qualifiedCount = eliminatedCount = 0; // reset
 				readState = ReadState.RESULT_DETECTING;
 				if (r.getDef().type == RoundType.SURVIVAL) {
+					if (survivalScoreTimer != null)
+						survivalScoreTimer.cancel();
 					survivalScoreTimer = new Timer();
 					survivalScoreTimer.scheduleAtFixedRate(new TimerTask() {
 						@Override
@@ -1995,6 +2031,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 	static int FONT_SIZE_BASE;
 	static int FONT_SIZE_RANK;
 	static int FONT_SIZE_DETAIL;
+	static String playerName;
 
 	static ServerSocketMutex mutex = new ServerSocketMutex(29879);
 	static FallBallRecord frame;
@@ -2012,7 +2049,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		UIManager.setLookAndFeel("com.sun.java.swing.plaf.windows.WindowsLookAndFeel");
 
 		Properties prop = new Properties();
-		try (BufferedReader br = new BufferedReader(new FileReader("settings.ini"))) {
+		try (BufferedReader br = new BufferedReader(
+				new InputStreamReader(new FileInputStream("settings.ini"), StandardCharsets.UTF_8))) {
 			prop.load(br);
 		} catch (FileNotFoundException e) {
 		}
@@ -2027,6 +2065,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		FONT_SIZE_RANK = v == null ? 16 : Integer.parseInt(v, 10);
 		v = prop.getProperty("FONT_SIZE_DETAIL");
 		FONT_SIZE_DETAIL = v == null ? 16 : Integer.parseInt(v, 10);
+
+		playerName = prop.getProperty("PLAYER_NAME");
 
 		System.err.println("FONT_SIZE_BASE=" + FONT_SIZE_BASE);
 		System.err.println("FONT_SIZE_RANK=" + FONT_SIZE_RANK);
@@ -2060,6 +2100,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		reader.start();
 	}
+
+	JCheckBox sendRate;
 
 	JLabel pingLabel;
 	JTextPane statsArea;
@@ -2102,7 +2144,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("v0.3.8");
+		label = new JLabel("v0.3.9");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2149,6 +2191,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 
 		JScrollPane scroller;
 
+		/////////////////////////////////////////////////////////////////////////////////////////
+		// left
 		titlePanel = new TitlePanel();
 		p.add(titlePanel);
 		l.putConstraint(SpringLayout.WEST, titlePanel, COL1_X, SpringLayout.WEST, p);
@@ -2161,12 +2205,12 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.WEST, scroller, COL1_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, COL2_X - 10, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.NORTH, scroller, 8, SpringLayout.SOUTH, titlePanel);
-		l.putConstraint(SpringLayout.SOUTH, scroller, -100, SpringLayout.SOUTH, p);
+		l.putConstraint(SpringLayout.SOUTH, scroller, -130, SpringLayout.SOUTH, p);
 
 		filterSel = new JComboBox<RoundFilter>();
 		filterSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.WEST, filterSel, COL1_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, filterSel, -90, SpringLayout.SOUTH, p);
+		l.putConstraint(SpringLayout.NORTH, filterSel, -120, SpringLayout.SOUTH, p);
 		filterSel.setSize(95, 20);
 		filterSel.addItem(new AllRoundFilter());
 		filterSel.addItem(new CurrentSessionRoundFilter());
@@ -2192,7 +2236,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		limitSel = new JComboBox<Integer>();
 		limitSel.setFont(new Font(fontFamily, Font.BOLD, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.WEST, limitSel, COL1_X, SpringLayout.WEST, p);
-		l.putConstraint(SpringLayout.NORTH, limitSel, -60, SpringLayout.SOUTH, p);
+		l.putConstraint(SpringLayout.NORTH, limitSel, -90, SpringLayout.SOUTH, p);
 		limitSel.setSize(44, 20);
 		limitSel.addItem(0);
 		limitSel.addItem(10);
@@ -2215,6 +2259,16 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(120, 20);
 		p.add(label);
 
+		sendRate = new JCheckBox("Enable rating: " + playerName);
+		sendRate.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
+		l.putConstraint(SpringLayout.WEST, sendRate, COL1_X, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.EAST, sendRate, COL2_X - 10, SpringLayout.WEST, p);
+		l.putConstraint(SpringLayout.NORTH, sendRate, 2, SpringLayout.SOUTH, limitSel);
+		l.putConstraint(SpringLayout.SOUTH, sendRate, -30, SpringLayout.SOUTH, p);
+		p.add(sendRate);
+
+		/////////////////////////////////////////////////////////////////////////////////////////
+		// center
 		achievementPanel = new AchievementPanel();
 		p.add(scroller = new JScrollPane(achievementPanel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL2_X, SpringLayout.WEST, p);
@@ -2223,6 +2277,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		l.putConstraint(SpringLayout.SOUTH, scroller, -30, SpringLayout.SOUTH, p);
 		scroller.setPreferredSize(new Dimension(FONT_SIZE_RANK * 25, 0));
 
+		/////////////////////////////////////////////////////////////////////////////////////////
+		// right
 		roundsSel = new JList<Round>(new FastListModel<>());
 		roundsSel.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
 		p.add(scroller = new JScrollPane(roundsSel));
@@ -2388,6 +2444,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			Core.updateStats();
 			updateRounds();
 		});
+		notifyRoundInfo(false);
 	}
 
 	@Override
@@ -2412,6 +2469,8 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			achievementPanel.updateDaily();
 			updateRounds();
 		});
+		notifyRoundInfo(true);
+		notifyResult(Core.currentRound);
 	}
 
 	Round getSelectedRound() {
@@ -2426,6 +2485,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		if (p.isQualified())
 			r.qualifiedCount += r.disableMe ? -1 : 1;
 		r.playerCountAdd = r.adjustPlayerCount();
+		notifyResult(r);
 		updateRounds();
 		Core.updateStats();
 		displayStats();
@@ -2527,6 +2587,101 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 			text += " " + server.get("country") + " " + server.get("regionName") + " " + server.get("city") + " "
 					+ server.get("timezone");
 		pingLabel.setText(text);
+	}
+
+	///////////////////////////////////////////////////////////////////////////
+	// send to rating server
+	static final DateFormat apiDateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+
+	void notifyRoundInfo(boolean done) {
+		if (!sendRate.isSelected() || playerName == null || playerName.length() == 0)
+			return;
+		Round r = Core.currentRound;
+		if (!r.isCustomFallBall())
+			return;
+		Date time = r.start;
+		String ip = Core.currentMatch.ip;
+		String seed = Long.toHexString(r.seed);
+		try {
+			StringBuilder body = new StringBuilder();
+			body.append("api=1");
+			body.append("&date=").append(URLEncoder.encode(apiDateFormat.format(time), "UTF-8"));
+			body.append("&random_seed=").append(seed);
+			body.append("&server_ip=").append(ip);
+			body.append("&player_num=").append(r.playerCount);
+			if (!done) {
+				body.append("&progress=start");
+				body.append("&win_team=0");
+				body.append("&lose_team=0");
+			} else {
+				body.append("&progress=finish");
+				int winIndex = 0;
+				if (r.teamScore[0] < r.teamScore[1])
+					winIndex = 1;
+				body.append("&win_team=").append(r.teamScore[winIndex]);
+				body.append("&lose_team=").append(r.teamScore[1 - winIndex]);
+			}
+			URL url = new URL("https://www.fallball.sm64rta.info/match_reg");
+			post(url, body.toString());
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		}
+	}
+
+	void notifyResult(Round r) {
+		if (!sendRate.isSelected() || playerName == null || playerName.length() == 0)
+			return;
+		if (!r.isCustomFallBall())
+			return;
+		if (r.getMe() == null)
+			return;
+		if (r == Core.currentRound && !r.sentResult && r.disableMe)
+			return;
+		String ip = Core.currentMatch.ip;
+		String seed = Long.toHexString(r.seed);
+		try {
+			StringBuilder body = new StringBuilder();
+			body.append("api=1");
+			body.append("&player=").append(URLEncoder.encode(playerName, "UTF-8"));
+			body.append("&match_info=0,").append(ip).append(",").append(seed);
+			if (r.disableMe)
+				body.append("&shinpan=on");
+			else
+				body.append("&result=").append(r.getMe().isQualified() ? "1" : "0");
+			URL url = new URL("https://www.fallball.sm64rta.info/form_reg");
+			post(url, body.toString());
+			r.sentResult = true;
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		}
+	}
+
+	Timer timer = new Timer();
+
+	void post(final URL url, final String body) {
+		timer.schedule(new TimerTask() {
+			@Override
+			public void run() {
+				try {
+					URLConnection c = url.openConnection();
+					c.setDoOutput(true);
+					c.connect();
+					c.getOutputStream().write(body.getBytes(StandardCharsets.UTF_8));
+					InputStream in = c.getInputStream();
+					ByteArrayOutputStream result = new ByteArrayOutputStream();
+					byte[] buf = new byte[1024];
+					int len;
+					while ((len = in.read(buf)) > 0) {
+						result.write(buf, 0, len);
+					}
+					System.out.println(url);
+					System.out.println(body);
+					System.out.println(new String(result.toByteArray(), StandardCharsets.UTF_8));
+				} catch (Exception ex) {
+					ex.printStackTrace();
+				}
+			}
+		}, (long) (Math.random() * 5000));
 	}
 }
 

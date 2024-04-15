@@ -1,3 +1,3 @@
 java -version
-java -jar FallGuysRecord.jar
+java -jar FallBallRecord.jar
 pause
