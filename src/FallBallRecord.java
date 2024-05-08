@@ -247,6 +247,10 @@ class Round implements Comparable<Round> {
 		return "FallGuy_FallBall_5".equals(name);
 	}
 
+	public boolean isGoldenGoal() {
+		return "event_sports_suddendeath_squads".equals(match.name);
+	}
+
 	public boolean isCustomFallBall() {
 		return isFallBall() && "event_only_fall_ball_template".equals(match.name) && match.isCustom;
 	}
@@ -914,7 +918,7 @@ class CurrentSessionRoundFilter implements RoundFilter {
 class CustomRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && r.isCustomFallBall();
+		return r.isFallBall() && !r.isGoldenGoal() && r.getMe() != null && r.isCustomFallBall();
 	}
 
 	@Override
@@ -926,7 +930,7 @@ class CustomRoundFilter implements RoundFilter {
 class SquadRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && r.isSquad() && r.getMe().partyId == 0;
+		return r.isFallBall() && !r.isGoldenGoal() && r.getMe() != null && r.isSquad() && r.getMe().partyId == 0;
 	}
 
 	@Override
@@ -947,10 +951,23 @@ class SubShowRoundFilter implements RoundFilter {
 	}
 }
 
+class GoldenGoalRoundFilter implements RoundFilter {
+	@Override
+	public boolean isEnabled(Round r) {
+		return r.isFallBall() && r.isGoldenGoal() && r.getMe() != null;
+	}
+
+	@Override
+	public String toString() {
+		return Core.getRes("GoldenGoalOnly");
+	}
+}
+
+// custom GG はパーティとして扱われてしまうので、実際にパーティでGGやることあり得るけど強制除外する。
 class PartyRoundFilter implements RoundFilter {
 	@Override
 	public boolean isEnabled(Round r) {
-		return r.isFallBall() && r.getMe() != null && r.getMe().partyId != 0;
+		return r.isFallBall() && !r.isGoldenGoal() && r.getMe() != null && r.getMe().partyId != 0;
 	}
 
 	@Override
@@ -2146,7 +2163,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		label.setSize(100, 20);
 		p.add(label);
 
-		label = new JLabel("ver0.4.0");
+		label = new JLabel("ver0.4.1");
 		label.setFont(new Font(fontFamily, Font.PLAIN, FONT_SIZE_BASE));
 		l.putConstraint(SpringLayout.EAST, label, -8, SpringLayout.EAST, p);
 		l.putConstraint(SpringLayout.SOUTH, label, -8, SpringLayout.SOUTH, p);
@@ -2217,6 +2234,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		filterSel.addItem(new AllRoundFilter());
 		filterSel.addItem(new CurrentSessionRoundFilter());
 		filterSel.addItem(new CustomRoundFilter());
+		filterSel.addItem(new GoldenGoalRoundFilter());
 		filterSel.addItem(new SubShowRoundFilter());
 		filterSel.addItem(new SquadRoundFilter());
 		filterSel.addItem(new PartyRoundFilter());
