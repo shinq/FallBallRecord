@@ -1379,21 +1379,17 @@ class Core {
 
 	// 新しい順にする
 	public static List<Round> filter(RoundFilter f) {
-		return filter(f, 0, false);
+		return filter(f, false);
 	}
 
-	public static List<Round> filter(RoundFilter f, int limit, boolean cacheUpdate) {
+	public static List<Round> filter(RoundFilter f, boolean cacheUpdate) {
 		List<Round> result = new ArrayList<>();
-		int c = 0;
 		synchronized (listLock) {
 			for (ListIterator<Round> i = rounds.listIterator(rounds.size()); i.hasPrevious();) {
 				Round r = i.previous();
 				if (f != null && !f.isEnabled(r))
 					continue;
 				result.add(r);
-				c += 1;
-				if (limit > 0 && c >= limit)
-					break;
 			}
 		}
 		if (cacheUpdate)
@@ -1406,7 +1402,8 @@ class Core {
 			return;
 		synchronized (listLock) {
 			stat.reset();
-			for (Round r : filter(filter, limit, true)) {
+			int c = 0;
+			for (Round r : filter(filter, true)) {
 				if (!r.isEnabled()/* || r.getSubstanceQualifiedCount() == 0*/)
 					continue;
 
@@ -1421,6 +1418,9 @@ class Core {
 					stat.totalParticipationCount += 1; // 参加 round 数
 					stat.totalWinCount += p.isQualified() ? 1 : 0;
 				}
+				c += 1;
+				if (limit > 0 && c >= limit)
+					break;
 			}
 		}
 	}
