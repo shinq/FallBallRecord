@@ -1213,7 +1213,8 @@ class Core {
 					m = new Match(Long.parseLong(d[1]), d[3], matchStart, d[4], isCustom);
 					m.pingMS = Integer.parseInt(d[5]);
 					m.winStreak = Integer.parseInt(d[6]);
-					addMatch(m);
+					matches.add(m);
+					currentMatch = m;
 					continue;
 				}
 				if (!"r".equals(d[0]) || d.length < 13)
@@ -1238,7 +1239,9 @@ class Core {
 				if (d.length > 13)
 					r.teamScore = Core.intArrayFromString(d[13]);
 				r.add(p);
-				addRound(r);
+				r.match.rounds.add(r);
+				rounds.add(r);
+				currentRound = r;
 				r.playerCount = Integer.parseInt(d[6]); // reset
 			}
 		} catch (Exception ex) {
@@ -1389,7 +1392,11 @@ class Core {
 				Round r = i.previous();
 				if (f != null && !f.isEnabled(r))
 					continue;
-				result.add(r);
+				if (!cacheUpdate || limit <= 0 || result.size() < limit) {
+					result.add(r);
+				} else if (cacheUpdate && limit > 0 && result.size() >= limit) {
+					break;
+				}
 			}
 		}
 		if (cacheUpdate)
@@ -1402,9 +1409,10 @@ class Core {
 			return;
 		synchronized (listLock) {
 			stat.reset();
-			int c = 0;
-			for (Round r : filter(filter, true)) {
-				if (!r.isEnabled()/* || r.getSubstanceQualifiedCount() == 0*/)
+			for (Round r : rounds) {
+				if (filter != null && !filter.isEnabled(r))
+					continue;
+				if (!r.isEnabled())
 					continue;
 
 				// このラウンドの参加者の結果を反映
@@ -1418,10 +1426,8 @@ class Core {
 					stat.totalParticipationCount += 1; // 参加 round 数
 					stat.totalWinCount += p.isQualified() ? 1 : 0;
 				}
-				c += 1;
-				if (limit > 0 && c >= limit)
-					break;
 			}
+			filter(filter, true);
 		}
 	}
 
@@ -2312,6 +2318,7 @@ public class FallBallRecord extends JFrame implements FGReader.Listener {
 		// right
 		roundsSel = new JList<Round>(new FastListModel<>());
 		roundsSel.setFont(new Font(monospacedFontFamily, Font.PLAIN, FONT_SIZE_BASE + 4));
+		roundsSel.setFixedCellHeight(28);
 		p.add(scroller = new JScrollPane(roundsSel));
 		l.putConstraint(SpringLayout.WEST, scroller, COL3_X, SpringLayout.WEST, p);
 		l.putConstraint(SpringLayout.EAST, scroller, -10, SpringLayout.EAST, p);
